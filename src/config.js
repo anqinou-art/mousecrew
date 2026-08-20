@@ -45,9 +45,9 @@ function stripComments(value) {
 const DEFAULTS = {
   host: '127.0.0.1',
   port: 8787,
-  dbPath: './data/agentdesk.db',
+  dbPath: './data/mousecrew.db',
   archivePath: './data/group-archive.jsonl',
-  tokenFile: '~/.config/agentdesk/auth.json',
+  tokenFile: '~/.config/mousecrew/auth.json',
   nudge: { enabled: true, scanMs: 300000, idleMs: 600000, dedupMs: 1800000 },
   delivery: { stalePendingMs: 600000, maxPending: 200 },
   contextWatch: { enabled: true, thresholdTurns: 10, noHandoff: [], handoffDir: './data/handoff' },
@@ -159,8 +159,8 @@ function normalizeAgent(a) {
 
 function load({ configFile, agentsFile, root } = {}) {
   const base = root || process.cwd();
-  const cfgPath = configFile || process.env.AGENTDESK_CONFIG || path.join(base, 'config.json');
-  const agtPath = agentsFile || process.env.AGENTDESK_AGENTS || path.join(base, 'agents.json');
+  const cfgPath = configFile || process.env.MOUSECREW_CONFIG || path.join(base, 'config.json');
+  const agtPath = agentsFile || process.env.MOUSECREW_AGENTS || path.join(base, 'agents.json');
 
   const fileCfg = fs.existsSync(cfgPath) ? readJson(cfgPath) : {};
   const cfg = { ...DEFAULTS, ...fileCfg };

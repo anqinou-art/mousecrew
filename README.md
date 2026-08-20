@@ -1,4 +1,4 @@
-# agentdesk
+# mousecrew
 
 **A group chat and a work board for CLI coding agents.**
 
@@ -6,7 +6,7 @@ You have a few AI coding assistants. Today you talk to each of them in its own w
 track of who is doing what in your head, and lose the thread the moment you walk away from
 the machine.
 
-agentdesk turns them into a crew you can run from anywhere:
+mousecrew turns them into a crew you can run from anywhere:
 
 ```
 you (phone, laptop, curl)
@@ -54,21 +54,21 @@ crew member lives. That separation is the whole design.
 ## Quick start
 
 ```bash
-git clone <this repo> agentdesk && cd agentdesk
+git clone <this repo> mousecrew && cd mousecrew
 npm install
 
 cp config.example.json config.json
 cp agents.example.json agents.json      # edit: who is on your crew
 
-mkdir -p ~/.config/agentdesk
-printf '{"token":"%s"}' "$(openssl rand -hex 32)" > ~/.config/agentdesk/auth.json
-chmod 600 ~/.config/agentdesk/auth.json
+mkdir -p ~/.config/mousecrew
+printf '{"token":"%s"}' "$(openssl rand -hex 32)" > ~/.config/mousecrew/auth.json
+chmod 600 ~/.config/mousecrew/auth.json
 
 npm start
 ```
 
 ```
-agentdesk on http://127.0.0.1:8787 — 3 agents registered
+mousecrew on http://127.0.0.1:8787 — 3 agents registered
   @backend      local     repos: server
   @auditor      local     repos: server  [merge gate]
   @frontend     remote    repos: app
@@ -77,13 +77,13 @@ agentdesk on http://127.0.0.1:8787 — 3 agents registered
 Then drive it:
 
 ```bash
-node bin/agentdesk.js create --title "fix the login endpoint" --assignee backend --repo server -s me
-node bin/agentdesk.js say --as me "@backend see WO-001 when you get a chance"
-node bin/agentdesk.js list
-node bin/agentdesk.js status
+node bin/mousecrew.js create --title "fix the login endpoint" --assignee backend --repo server -s me
+node bin/mousecrew.js say --as me "@backend see WO-001 when you get a chance"
+node bin/mousecrew.js list
+node bin/mousecrew.js status
 ```
 
-`bin/agentdesk.js` with no arguments prints every command.
+`bin/mousecrew.js` with no arguments prints every command.
 
 ### Try it without any AI at all
 
@@ -108,12 +108,12 @@ and `exec` (any command that reads a prompt on stdin and prints a reply — one 
 message, no session continuity).
 
 **`remote`** — a CLI on another machine.
-Run `bin/agentdesk-worker.js` there; it dials out, so the other machine needs no inbound
+Run `bin/mousecrew-worker.js` there; it dials out, so the other machine needs no inbound
 port. Use it when the work is physically tied to a box — a build toolchain, a key, a device.
 
 ```bash
-AGENTDESK_URL=http://server:8787 AGENTDESK_TOKEN=... \
-  node bin/agentdesk-worker.js --agents frontend --workdir ~/myapp --cli claude
+MOUSECREW_URL=http://server:8787 MOUSECREW_TOKEN=... \
+  node bin/mousecrew-worker.js --agents frontend --workdir ~/myapp --cli claude
 ```
 
 **`terminal`** — an interactive window you are also using.
@@ -126,7 +126,7 @@ and interrupt mid-thought. Needs the terminal adapter — **not in this release*
 | Available when your laptop is closed | yes | no |
 | Can you interrupt mid-task | no | yes |
 | Message never dropped | queued | expires after 10 minutes |
-| Lifecycle managed by | agentdesk | you |
+| Lifecycle managed by | mousecrew | you |
 
 ---
 

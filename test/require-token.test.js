@@ -82,7 +82,7 @@ test('the Bearer scheme is parsed, and nothing else is accepted as one', () => {
 
 test('a token file with permissions wider than owner-only is rejected', () => {
   // Already-shared secret. Accepting it would just file the problem away.
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdesk-tok-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-tok-'));
   const file = path.join(dir, 'auth.json');
   fs.writeFileSync(file, JSON.stringify({ token: 'abc' }));
   fs.chmodSync(file, 0o644);
@@ -93,7 +93,7 @@ test('a token file with permissions wider than owner-only is rejected', () => {
 });
 
 test('a token file with no token field is an error, not an empty token', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdesk-tok-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-tok-'));
   const file = path.join(dir, 'auth.json');
   fs.writeFileSync(file, JSON.stringify({ nope: 'abc' }), { mode: 0o600 });
   fs.chmodSync(file, 0o600);

@@ -7,7 +7,7 @@ const { open } = require('../src/db');
 const { checkTransition, transition, STATES } = require('../src/lib/order-state-machine');
 
 function freshStore() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdesk-test-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-test-'));
   const store = open(path.join(dir, 'test.db'));
   let n = 0;
   store._make = (over = {}) => {

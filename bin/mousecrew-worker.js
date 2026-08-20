@@ -1,13 +1,13 @@
 #!/usr/bin/env node
-// agentdesk-worker.js — run crew members on a machine that is not the server.
+// mousecrew-worker.js — run crew members on a machine that is not the server.
 //
 // Why this exists: some work is physically tied to a box. Building a phone app needs the
 // laptop with the toolchain; touching a private repo needs the machine holding the key.
 // The worker dials out to the server, so the laptop needs no inbound port.
 //
 // Usage:
-//   AGENTDESK_URL=http://server:8787 AGENTDESK_TOKEN=... \
-//     node bin/agentdesk-worker.js --agents frontend --workdir ~/myapp --cli claude
+//   MOUSECREW_URL=http://server:8787 MOUSECREW_TOKEN=... \
+//     node bin/mousecrew-worker.js --agents frontend --workdir ~/myapp --cli claude
 
 const WebSocket = require('ws');
 const { spawn } = require('child_process');
@@ -18,8 +18,8 @@ function flag(name, fallback) {
   return i >= 0 && args[i + 1] && !args[i + 1].startsWith('--') ? args[i + 1] : fallback;
 }
 
-const URL_BASE = process.env.AGENTDESK_URL || 'http://127.0.0.1:8787';
-const TOKEN = process.env.AGENTDESK_TOKEN;
+const URL_BASE = process.env.MOUSECREW_URL || 'http://127.0.0.1:8787';
+const TOKEN = process.env.MOUSECREW_TOKEN;
 const AGENTS = (flag('agents', '') || '').split(',').map((s) => s.trim()).filter(Boolean);
 const WORKDIR = flag('workdir', process.cwd());
 const CLI = flag('cli', 'claude');
@@ -30,7 +30,7 @@ const HEARTBEAT_MS = 25_000;
 // timeout so the server gives up first and the user sees one clear failure, not two.
 const TURN_TIMEOUT_MS = Number(flag('turn-timeout-ms', 10 * 60 * 1000));
 
-if (!TOKEN) { console.error('set AGENTDESK_TOKEN'); process.exit(1); }
+if (!TOKEN) { console.error('set MOUSECREW_TOKEN'); process.exit(1); }
 if (!AGENTS.length) { console.error('need --agents <id[,id...]>'); process.exit(1); }
 
 const wsUrl = URL_BASE.replace(/^http/, 'ws') + '/ws/bridge?token=' + encodeURIComponent(TOKEN);

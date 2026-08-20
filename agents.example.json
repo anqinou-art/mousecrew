@@ -39,7 +39,7 @@
       "id": "frontend",
       "displayName": "frontend",
       "aliases": ["fe", "app"],
-      "// transport": "remote = runs on another machine via the WebSocket bridge (bin/agentdesk-worker.js).",
+      "// transport": "remote = runs on another machine via the WebSocket bridge (bin/mousecrew-worker.js).",
       "transport": "remote",
       "repos": ["myapp"],
       "canMerge": false,

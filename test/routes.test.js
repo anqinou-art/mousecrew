@@ -32,7 +32,7 @@ const CREW = [
 // runner never exits — a suite that hangs the moment it goes red is barely more useful
 // than one that never goes red at all, because you cannot tell the two apart.
 async function boot(t, crew = CREW) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdesk-routes-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-routes-'));
   const tokenFile = path.join(dir, 'auth.json');
   fs.writeFileSync(tokenFile, JSON.stringify({ token: TOKEN }));
   fs.chmodSync(tokenFile, 0o600);

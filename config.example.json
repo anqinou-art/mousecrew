@@ -1,11 +1,11 @@
 {
   "host": "127.0.0.1",
   "port": 8787,
-  "dbPath": "./data/agentdesk.db",
+  "dbPath": "./data/mousecrew.db",
   "archivePath": "./data/group-archive.jsonl",
 
   "// tokenFile": "Bearer token for every API call. Keep this file OUTSIDE any git tree, mode 0600.",
-  "tokenFile": "~/.config/agentdesk/auth.json",
+  "tokenFile": "~/.config/mousecrew/auth.json",
 
   "// nudge": "Chase whoever currently owes an action on an open order.",
   "nudge": {

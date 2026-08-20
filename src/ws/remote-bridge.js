@@ -1,6 +1,6 @@
 // ws/remote-bridge.js — crew members that live on another machine.
 //
-// The worker (bin/agentdesk-worker.js) dials in, registers the agent ids it can run, and
+// The worker (bin/mousecrew-worker.js) dials in, registers the agent ids it can run, and
 // answers dispatches. The bridge holds no process; it holds a promise per in-flight turn.
 //
 // Auth note: this handshake does NOT pass through the Express middleware stack — upgrade

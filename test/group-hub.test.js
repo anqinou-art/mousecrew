@@ -10,7 +10,7 @@ const { createArchive } = require('../src/lib/archive');
 const { normalizeAgent } = require('../src/config');
 
 function makeHub() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdesk-hub-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-hub-'));
   const store = open(path.join(dir, 'test.db'));
   const archive = createArchive(path.join(dir, 'archive.jsonl'));
   const identity = buildIdentity([

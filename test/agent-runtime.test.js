@@ -25,7 +25,7 @@ function fakeProcess() {
 }
 
 function makeRuntime(over = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdesk-rt-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-rt-'));
   const procs = [];
   const cfg = normalizeAgent({
     id: 'tester', transport: 'local', runner: 'claude', workDir: dir,

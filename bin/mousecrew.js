@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// bin/agentdesk.js — what an agent (or a person) uses to drive the board.
+// bin/mousecrew.js — what an agent (or a person) uses to drive the board.
 //
 // Everything here is a thin shell over the HTTP API. That is on purpose: an agent that
 // can run one command can file its own work, move it along, and speak to the group
@@ -16,17 +16,17 @@ function expandTilde(p) {
 }
 
 function loadClientConfig() {
-  const base = process.env.AGENTDESK_ROOT || process.cwd();
+  const base = process.env.MOUSECREW_ROOT || process.cwd();
   let cfg = {};
-  const cfgPath = process.env.AGENTDESK_CONFIG || path.join(base, 'config.json');
+  const cfgPath = process.env.MOUSECREW_CONFIG || path.join(base, 'config.json');
   try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')); } catch { /* fall back to env */ }
 
-  const url = process.env.AGENTDESK_URL
+  const url = process.env.MOUSECREW_URL
     || `http://${cfg.host || '127.0.0.1'}:${cfg.port || 8787}`;
 
-  let token = process.env.AGENTDESK_TOKEN || null;
+  let token = process.env.MOUSECREW_TOKEN || null;
   if (!token) {
-    const tokenFile = expandTilde(cfg.tokenFile || '~/.config/agentdesk/auth.json');
+    const tokenFile = expandTilde(cfg.tokenFile || '~/.config/mousecrew/auth.json');
     try {
       const st = fs.statSync(tokenFile);
       if (st.mode & 0o077) {
@@ -34,7 +34,7 @@ function loadClientConfig() {
       }
       token = JSON.parse(fs.readFileSync(tokenFile, 'utf8')).token;
     } catch (e) {
-      die(`no token: set AGENTDESK_TOKEN or create ${tokenFile} (mode 0600) with {"token":"..."}`);
+      die(`no token: set MOUSECREW_TOKEN or create ${tokenFile} (mode 0600) with {"token":"..."}`);
     }
   }
   return { url, token };
@@ -76,7 +76,7 @@ function flags(argv) {
 
 const NEXT = { draft: 'in_progress', in_progress: 'submitted', submitted: 'auditing', rejected: 'in_progress' };
 
-const USAGE = `agentdesk — drive the work board
+const USAGE = `mousecrew — drive the work board
 
   list [--assignee X] [--status S]        list orders
   show <id>                               one order with its timeline
@@ -96,7 +96,7 @@ const USAGE = `agentdesk — drive the work board
   reply --as <agent> "text"                   answer a direct message
   status                                      every agent's state
 
-Config: AGENTDESK_URL / AGENTDESK_TOKEN, or ./config.json + its tokenFile.`;
+Config: MOUSECREW_URL / MOUSECREW_TOKEN, or ./config.json + its tokenFile.`;
 
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
@@ -215,7 +215,7 @@ async function main() {
       const text = f._.join(' ');
       if (!text) die('need "text"');
       const r = await api('POST', '/api/group/post', {
-        sender: f.as || process.env.AGENTDESK_ME || 'cli',
+        sender: f.as || process.env.MOUSECREW_ME || 'cli',
         content: text,
         reDispatch: !f['no-redispatch'],
       });
@@ -231,8 +231,8 @@ async function main() {
     }
 
     case 'reply': {
-      const who = f.as || process.env.AGENTDESK_ME;
-      if (!who) die('need --as <agent> (or set AGENTDESK_ME)');
+      const who = f.as || process.env.MOUSECREW_ME;
+      if (!who) die('need --as <agent> (or set MOUSECREW_ME)');
       await api('POST', `/api/dm/${who}/post`, { content: f._.join(' ') });
       console.log('replied');
       break;

@@ -11,7 +11,7 @@ function git(dir, ...args) {
 }
 
 function makeRepo() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdesk-git-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-git-'));
   git(dir, 'init', '-q', '-b', 'main');
   git(dir, 'config', 'user.email', 'test@example.com');
   git(dir, 'config', 'user.name', 'test');

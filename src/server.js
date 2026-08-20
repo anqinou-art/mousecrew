@@ -77,7 +77,7 @@ function start(opts = {}) {
 
   ctx.nudger.start();
   server.listen(config.port, config.host, () => {
-    console.log(`agentdesk on http://${config.host}:${config.port} — ${ctx.agents.length} agents registered`);
+    console.log(`mousecrew on http://${config.host}:${config.port} — ${ctx.agents.length} agents registered`);
     for (const a of ctx.agents) {
       console.log(`  @${a.displayName.padEnd(12)} ${a.transport.padEnd(9)} ${a.repos.length ? 'repos: ' + a.repos.join(',') : 'repos: (any)'}${a.canMerge ? '  [merge gate]' : ''}`);
     }

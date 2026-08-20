@@ -70,7 +70,7 @@ Each order names its repo. Assigning across that boundary is refused, and the re
 who should have it:
 
 ```
-$ agentdesk create --title "..." --assignee frontend --repo server
+$ mousecrew create --title "..." --assignee frontend --repo server
 HTTP 409
 {
   "error": "\"frontend\" does not own repo \"server\" (owns: app) — assign it to whoever
@@ -82,7 +82,7 @@ HTTP 409
 The merge gate is checked the same way:
 
 ```
-$ agentdesk audit-pass WO-001 -s backend
+$ mousecrew audit-pass WO-001 -s backend
 HTTP 403
 { "error": "only \"auditor\" may merge (single gate); \"backend\" may not" }
 ```
