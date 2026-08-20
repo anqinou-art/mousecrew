@@ -17,6 +17,16 @@
 #
 # Exits non-zero if any mutation survives, so this can gate a merge.
 #
+# ⚠️ Run this where you develop, not on a box that is doing real work. It is the whole
+# suite times the number of mutations — a sustained load spike, not a check. Run it on a
+# server hosting something live and you may find out the hard way: the box that hosted this
+# project's own crew cut the ssh session mid-run. Nothing broke, and that was closer to
+# luck than to design.
+#
+# The portability signal you actually want from another machine is `npm test` — a couple of
+# seconds, and it is the only place a different tool version can show you a bug your own
+# machine structurally cannot.
+#
 # Nothing is applied to your working tree. Every mutation runs in a throwaway copy —
 # an earlier version of this check edited the real tree, timed out mid-run, and left a
 # security gate deleted on disk. Do not "simplify" that away.
