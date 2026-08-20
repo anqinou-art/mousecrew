@@ -219,6 +219,19 @@ All endpoints require `Authorization: Bearer <token>`. There is no grace mode.
 
 ---
 
+## What was reviewed
+
+Two independent reviews ran against commit `2fc5575` — one for leaked private data, one for
+whether the logic closes. Everything they found was fixed before that sha was recorded.
+
+```bash
+git log --oneline 2fc5575..HEAD    # what landed after the review
+```
+
+[docs/AUDIT.md](docs/AUDIT.md) carries that sha and the list of things found afterwards and
+knowingly left alone. Writing the sha down is the point: *"nothing changed behind the
+reviewers' backs"* is a claim, and the diff is a fact.
+
 ## Known limitations
 
 Stated plainly, because you will meet them.
@@ -237,6 +250,10 @@ Stated plainly, because you will meet them.
   against `/api/group/history`; that is the design, not an oversight.
 - **`exec` agents have no memory between messages.** One process per message. Whatever the
   CLI remembers, it remembers on its own.
+- **`@mentions` are matched as plain substrings.** Quoting code or a chat log that contains
+  `@name` really will wake that person. Use a placeholder in examples.
+- **Filing an order for yourself pings you about it.** Noise, not breakage; the fix is
+  scoped in [docs/AUDIT.md](docs/AUDIT.md).
 
 ## Roadmap
 
