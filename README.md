@@ -265,8 +265,9 @@ enforcement point and a function-only suite stays green with the gate wide open.
 And that claim is itself checked, rather than asserted:
 
 ```bash
-./scripts/mutation-check.sh          # 11 mutations, each must turn the suite red
-./scripts/mutation-check.sh --list   # what they are
+./scripts/mutation-check.sh              # 11 mutations, each must turn the suite red
+./scripts/mutation-check.sh --list       # what they are
+./scripts/mutation-check.sh --self-test  # can this checker still notice failure?
 ```
 
 Each mutation removes one rule this project claims to enforce — the merge gate, the audit
@@ -284,6 +285,14 @@ Two rules that came out of running it in anger:
 - **Nothing is mutated in your working tree.** Everything runs in a throwaway copy. An
   earlier version edited the real tree, timed out mid-run, and left a security gate
   deleted on disk.
+- **The checker is itself checked.** `--self-test` drives the real pass/fail parsing
+  against files whose outcome is known: a clean suite, a cancelled test, a suite that
+  never finishes, and a mutation whose pattern has drifted. It found two ways this script
+  had been lying:
+  - reading only `pass`/`fail` called a *cancelled* suite green — and on the baseline
+    check that means all 11 mutations run against a suite that was never green;
+  - a test file leaving a live handle never exits at all, so the checker waited forever,
+    which from the outside is indistinguishable from working. There is a wall clock now.
 
 Cleanup is registered with `t.after()` rather than at the end of each test body: a suite
 that hangs the moment it goes red is barely easier to read than one that never goes red,

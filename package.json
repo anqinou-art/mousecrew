@@ -12,7 +12,8 @@
     "start": "node src/server.js",
     "test": "node --test --test-timeout=20000 test/*.test.js",
     "watch:context": "node scripts/context-watch.js",
-    "mutation-check": "bash scripts/mutation-check.sh"
+    "mutation-check": "bash scripts/mutation-check.sh",
+    "mutation-check:self": "bash scripts/mutation-check.sh --self-test"
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0",
