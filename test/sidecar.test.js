@@ -16,8 +16,8 @@ const { normalizeAgent } = require('../src/config');
 // and it exists for the one question these cannot answer: whether characters arrive.
 
 const CREW = [
-  { id: 'architect', displayName: '架构师', transport: 'terminal', terminal: { adapter: 'fake', target: '架构师' } },
-  { id: 'codex', displayName: 'codex', transport: 'terminal', terminal: { adapter: 'fake', target: 'codex' } },
+  { id: 'architect', displayName: 'lead', transport: 'terminal', terminal: { adapter: 'fake', target: 'lead' } },
+  { id: 'builder', displayName: 'builder', transport: 'terminal', terminal: { adapter: 'fake', target: 'builder' } },
   { id: 'server-side', displayName: 'server-side', transport: 'local', workDir: '/tmp' },
 ].map(normalizeAgent);
 
@@ -25,8 +25,8 @@ function harness({ windows, now, options } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-sidecar-'));
   const adapter = createFakeAdapter({
     windows: windows || [
-      { ref: '%1', identity: '架构师', screen: '> ' },
-      { ref: '%2', identity: 'codex', screen: '> ' },
+      { ref: '%1', identity: 'lead', screen: '> ' },
+      { ref: '%2', identity: 'builder', screen: '> ' },
     ],
   });
   const acks = [];
@@ -66,7 +66,7 @@ test('the first history batch only sets a baseline', async () => {
   // Otherwise a restarting sidecar types the entire backlog into every window: every one
   // of those messages is new to the process and none of them are new to the crew.
   const h = harness();
-  h.sc.ingest([msg('rina', '@架构师 old message one'), msg('rina', '@codex old message two', '2026-08-20T12:00:01Z')], 'history');
+  h.sc.ingest([msg('human', '@lead old message one'), msg('human', '@builder old message two', '2026-08-20T12:00:01Z')], 'history');
   assert.equal(h.sc.state.pending.length, 0);
   assert.equal(h.of('bootstrapped').length, 1);
   assert.equal(h.of('queued').length, 0);
@@ -74,25 +74,25 @@ test('the first history batch only sets a baseline', async () => {
 
 test('after the baseline, an addressed message is queued', async () => {
   const h = primed(harness());
-  h.sc.ingest([msg('rina', '@架构师 please look')], 'sse');
+  h.sc.ingest([msg('human', '@lead please look')], 'sse');
   assert.equal(h.of('queued').length, 1);
   assert.equal(h.of('queued')[0].agent, 'architect');
 });
 
 test('the same message from both channels is queued once', async () => {
   const h = primed(harness());
-  const m = msg('rina', '@codex hello');
+  const m = msg('human', '@builder hello');
   h.sc.ingest([m], 'sse');
-  h.sc.ingest([{ content: m.content, ts: m.ts, metadata: JSON.stringify({ sender: 'rina' }) }], 'history');
+  h.sc.ingest([{ content: m.content, ts: m.ts, metadata: JSON.stringify({ sender: 'human' }) }], 'history');
   assert.equal(h.of('queued').length, 1);
 });
 
 test("a crew member's own message is not queued back to it", async () => {
   // The production bug, at the level that matters: end to end, not just in the pure function.
   const h = primed(harness());
-  h.sc.ingest([msg('architect', '@架构师 note to self, and @codex you look too')], 'sse');
+  h.sc.ingest([msg('architect', '@lead note to self, and @builder you look too')], 'sse');
   const queued = h.of('queued').map((e) => e.agent);
-  assert.deepEqual(queued, ['codex']);
+  assert.deepEqual(queued, ['builder']);
 });
 
 test('order cards are not delivered to windows', async () => {
@@ -105,7 +105,7 @@ test('order cards are not delivered to windows', async () => {
 
 test('an idle window receives the message, and the queue empties', async () => {
   const h = primed(harness());
-  h.sc.ingest([msg('rina', '@架构师 the deploy is red')], 'sse');
+  h.sc.ingest([msg('human', '@lead the deploy is red')], 'sse');
   await h.sc.deliver();
 
   const injected = h.of('injected');
@@ -120,8 +120,8 @@ test('an idle window receives the message, and the queue empties', async () => {
 });
 
 test('a busy window is left alone and the message waits', async () => {
-  const h = primed(harness({ windows: [{ ref: '%1', identity: '架构师', screen: 'working… (esc to interrupt)' }] }));
-  h.sc.ingest([msg('rina', '@架构师 when you get a moment')], 'sse');
+  const h = primed(harness({ windows: [{ ref: '%1', identity: 'lead', screen: 'working… (esc to interrupt)' }] }));
+  h.sc.ingest([msg('human', '@lead when you get a moment')], 'sse');
   await h.sc.deliver();
 
   assert.equal(h.of('busy-wait').length, 1);
@@ -131,8 +131,8 @@ test('a busy window is left alone and the message waits', async () => {
 });
 
 test('...and it lands once the window frees up', async () => {
-  const h = primed(harness({ windows: [{ ref: '%1', identity: '架构师', screen: 'working… (esc to interrupt)' }] }));
-  h.sc.ingest([msg('rina', '@架构师 later then')], 'sse');
+  const h = primed(harness({ windows: [{ ref: '%1', identity: 'lead', screen: 'working… (esc to interrupt)' }] }));
+  h.sc.ingest([msg('human', '@lead later then')], 'sse');
   await h.sc.deliver();
   h.adapter.__test.setScreen('%1', '> ');
   await h.sc.deliver();
@@ -141,7 +141,7 @@ test('...and it lands once the window frees up', async () => {
 
 test('an unregistered window is waited for, not treated as an error', async () => {
   const h = primed(harness({ windows: [{ ref: '%1', identity: null, screen: '> ' }] }));
-  h.sc.ingest([msg('rina', '@架构师 anyone home')], 'sse');
+  h.sc.ingest([msg('human', '@lead anyone home')], 'sse');
   await h.sc.deliver();
   assert.equal(h.of('no-window')[0].reason, 'unclaimed');
   assert.equal(h.sc.state.pending.length, 1);
@@ -149,9 +149,9 @@ test('an unregistered window is waited for, not treated as an error', async () =
 
 test('two windows claiming one identity is refused rather than guessed', async () => {
   const h = primed(harness({
-    windows: [{ ref: '%1', identity: 'codex', screen: '> ' }, { ref: '%2', identity: 'codex', screen: '> ' }],
+    windows: [{ ref: '%1', identity: 'builder', screen: '> ' }, { ref: '%2', identity: 'builder', screen: '> ' }],
   }));
-  h.sc.ingest([msg('rina', '@codex which of you')], 'sse');
+  h.sc.ingest([msg('human', '@builder which of you')], 'sse');
   await h.sc.deliver();
   assert.equal(h.of('no-window')[0].reason, 'ambiguous');
   assert.equal(h.of('injected').length, 0);
@@ -161,7 +161,7 @@ test('two windows claiming one identity is refused rather than guessed', async (
 test('a failed injection keeps the message queued', async () => {
   const h = primed(harness());
   h.adapter.sendText = async () => { throw new Error('window went away'); };
-  h.sc.ingest([msg('rina', '@架构师 hello')], 'sse');
+  h.sc.ingest([msg('human', '@lead hello')], 'sse');
   await h.sc.deliver();
   assert.equal(h.of('inject-failed').length, 1);
   assert.equal(h.sc.state.pending.length, 1, 'dropping it here would lose a message nobody could trace');
@@ -170,8 +170,8 @@ test('a failed injection keeps the message queued', async () => {
 // ---------- shelf life ----------
 
 test('a message that waited too long is dropped, and the drop is reported', async () => {
-  const h = primed(harness({ windows: [{ ref: '%1', identity: '架构师', screen: 'busy (esc to interrupt)' }] }));
-  h.sc.ingest([msg('rina', '@架构师 urgent an hour ago')], 'sse');
+  const h = primed(harness({ windows: [{ ref: '%1', identity: 'lead', screen: 'busy (esc to interrupt)' }] }));
+  h.sc.ingest([msg('human', '@lead urgent an hour ago')], 'sse');
   await h.sc.deliver();
   h.advance(11 * 60 * 1000);
   await h.sc.deliver();
@@ -183,9 +183,9 @@ test('a message that waited too long is dropped, and the drop is reported', asyn
 test('an expired direct message is acknowledged back; a group one is not', async () => {
   // A dropped group message is still in the group history. A dropped direct message looks,
   // from the sender's side, exactly like being ignored.
-  const h = primed(harness({ windows: [{ ref: '%1', identity: '架构师', screen: 'busy (esc to interrupt)' }] }));
-  h.sc.ingestDirect({ target: 'architect', dmId: 'dm-1', sender: 'rina', content: 'just between us' });
-  h.sc.ingest([msg('rina', '@架构师 group thing')], 'sse');
+  const h = primed(harness({ windows: [{ ref: '%1', identity: 'lead', screen: 'busy (esc to interrupt)' }] }));
+  h.sc.ingestDirect({ target: 'architect', dmId: 'dm-1', sender: 'human', content: 'just between us' });
+  h.sc.ingest([msg('human', '@lead group thing')], 'sse');
   h.advance(11 * 60 * 1000);
   await h.sc.deliver();
 
@@ -194,7 +194,7 @@ test('an expired direct message is acknowledged back; a group one is not', async
 
 test('a delivered direct message is acknowledged too', async () => {
   const h = primed(harness());
-  h.sc.ingestDirect({ target: 'architect', dmId: 'dm-2', sender: 'rina', content: 'you there?' });
+  h.sc.ingestDirect({ target: 'architect', dmId: 'dm-2', sender: 'human', content: 'you there?' });
   await h.sc.deliver();
   assert.deepEqual(h.acks, [{ agent: 'architect', dmId: 'dm-2', status: 'delivered' }]);
   assert.match(h.adapter.__test.sentTo('%1').join(''), /reply --as architect/);
@@ -203,8 +203,8 @@ test('a delivered direct message is acknowledged too', async () => {
 // ---------- persistence ----------
 
 test('the queue survives a restart', async () => {
-  const h = primed(harness({ windows: [{ ref: '%1', identity: '架构师', screen: 'busy (esc to interrupt)' }] }));
-  h.sc.ingest([msg('rina', '@架构师 remember me')], 'sse');
+  const h = primed(harness({ windows: [{ ref: '%1', identity: 'lead', screen: 'busy (esc to interrupt)' }] }));
+  h.sc.ingest([msg('human', '@lead remember me')], 'sse');
   await h.sc.deliver();
 
   const statePath = h.sc.statePath;
@@ -222,20 +222,20 @@ test('the queue survives a restart', async () => {
 // ---------- presence ----------
 
 test('presence: no window is "stopped", not "idle"', async () => {
-  const h = primed(harness({ windows: [{ ref: '%1', identity: 'codex', screen: '> ' }] }));
+  const h = primed(harness({ windows: [{ ref: '%1', identity: 'builder', screen: '> ' }] }));
   const report = await h.sc.reportPresence();
   assert.equal(report.architect.state, 'stopped', 'we cannot see it — that is not the same as free');
-  assert.equal(report.codex.state, 'idle');
+  assert.equal(report.builder.state, 'idle');
 });
 
 test('presence uses the same screen reading as delivery back-pressure', async () => {
   // So the dashboard can never say "idle" about an agent the sidecar is holding messages
   // back from.
-  const h = primed(harness({ windows: [{ ref: '%1', identity: '架构师', screen: 'running (esc to interrupt)' }] }));
+  const h = primed(harness({ windows: [{ ref: '%1', identity: 'lead', screen: 'running (esc to interrupt)' }] }));
   const report = await h.sc.reportPresence();
   assert.equal(report.architect.state, 'busy');
 
-  h.sc.ingest([msg('rina', '@架构师 hi')], 'sse');
+  h.sc.ingest([msg('human', '@lead hi')], 'sse');
   await h.sc.deliver();
   assert.equal(h.of('busy-wait').length, 1, 'delivery agrees with the report');
 });
@@ -250,7 +250,7 @@ test('a presence report is sent upstream', async () => {
   const h = primed(harness());
   await h.sc.reportPresence();
   assert.equal(h.presences.length, 1);
-  assert.equal(h.presences[0].codex.state, 'idle');
+  assert.equal(h.presences[0].builder.state, 'idle');
 });
 
 // ---------- receipts survive a failing endpoint ----------
@@ -260,14 +260,14 @@ test('a receipt that cannot be sent is kept and retried, not lost', async () => 
   // exactly like being ignored. A receipt attempted once and dropped on failure puts the
   // system back in precisely that state — and by then the queue entry is gone, so nothing
   // would ever try again.
-  const h = primed(harness({ windows: [{ ref: '%1', identity: '架构师', screen: 'busy (esc to interrupt)' }] }));
+  const h = primed(harness({ windows: [{ ref: '%1', identity: 'lead', screen: 'busy (esc to interrupt)' }] }));
   let failing = true;
   h.sc.client.ack = async (agent, dmId, status) => {
     if (failing) throw new Error('server unreachable');
     h.acks.push({ agent, dmId, status });
   };
 
-  h.sc.ingestDirect({ target: 'architect', dmId: 'dm-9', sender: 'rina', content: 'still there?' });
+  h.sc.ingestDirect({ target: 'architect', dmId: 'dm-9', sender: 'human', content: 'still there?' });
   h.advance(11 * 60 * 1000);
   await h.sc.deliver();
 
@@ -282,9 +282,9 @@ test('a receipt that cannot be sent is kept and retried, not lost', async () => 
 });
 
 test('an owed receipt survives a restart', async () => {
-  const h = primed(harness({ windows: [{ ref: '%1', identity: '架构师', screen: 'busy (esc to interrupt)' }] }));
+  const h = primed(harness({ windows: [{ ref: '%1', identity: 'lead', screen: 'busy (esc to interrupt)' }] }));
   h.sc.client.ack = async () => { throw new Error('down'); };
-  h.sc.ingestDirect({ target: 'architect', dmId: 'dm-10', sender: 'rina', content: 'hello' });
+  h.sc.ingestDirect({ target: 'architect', dmId: 'dm-10', sender: 'human', content: 'hello' });
   h.advance(11 * 60 * 1000);
   await h.sc.deliver();
 

@@ -40,7 +40,7 @@ test('the screen probe fails on stale content — proving it can go red at all',
   // Run this before trusting the probe for anything. If it matched loosely, a window that
   // still had the *previous* run's output on it would report success while nothing was
   // delivered at all, and the end-to-end check would be decorative.
-  const leftoverFromAnEarlierRun = '[group] rina: deploy is red mc-nonce-OLD1234\n> ';
+  const leftoverFromAnEarlierRun = '[group] human: deploy is red mc-nonce-OLD1234\n> ';
   assert.equal(screenShows(leftoverFromAnEarlierRun, 'mc-nonce-NEW5678'), false, 'stale residue must not count as delivery');
   assert.equal(screenShows(leftoverFromAnEarlierRun, 'mc-nonce-OLD1234'), true, 'and it must still see content that is genuinely there');
 });
@@ -78,7 +78,7 @@ test('characters really arrive in a real tmux pane', { skip: hasTmux() ? false :
   // Before delivery the nonce is nowhere — so a pass below cannot be residue.
   assert.equal(screenShows(await adapter.readScreen(pane, 20), nonce), false);
 
-  sc.ingest([{ content: `@live-agent ${nonce}`, ts: new Date().toISOString(), metadata: { sender: 'rina' } }], 'sse');
+  sc.ingest([{ content: `@live-agent ${nonce}`, ts: new Date().toISOString(), metadata: { sender: 'human' } }], 'sse');
   const delivered = await sc.deliver();
   assert.equal(delivered.length, 1, 'the engine reports a delivery');
 

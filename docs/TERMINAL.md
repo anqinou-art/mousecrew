@@ -83,15 +83,16 @@ up in the thread as an undelivered notice.
 The single most expensive bug in the system this was extracted from lived here, undetected
 for months.
 
-The message bus records a sender by canonical id (`architect`). The local roster knows the
-same crew member by display name (`架构师`). Compare the raw strings and
-`'architect' !== '架构师'` is always true — so *"never deliver a message back to its own
-author"* silently never fires, and every group message an agent posts gets typed straight
-back into its own window.
+The message bus records a sender by canonical id (`architect`). The local roster may know
+the same crew member by a display name (`lead`) — very often in another script entirely,
+which is usually *why* the two differ. Compare the raw strings and `'architect' !== 'lead'`
+is always true, so *"never deliver a message back to its own author"* silently never fires,
+and every group message that agent posts gets typed straight back into its own window.
 
-It hid because the other two crew members had a display name identical to their id. Two
-thirds of the crew looked fine. There was even a test, and it was green: it passed a
-*display name* as the sender, a shape production never produces.
+It hides well, because it only misfires for entries whose display name differs from their
+id. Anywhere the two happen to be equal a naive comparison works by accident, so most of a
+roster looks fine. There was even a test, and it was green: it passed a *display name* as
+the sender, a shape production never produces.
 
 Here, the sidecar and the server resolve identities through the same `buildIdentity()` over
 the same roster. Not a convention — there is no second table to drift.

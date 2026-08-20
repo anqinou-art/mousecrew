@@ -5,42 +5,56 @@ const { buildIdentity } = require('../src/lib/identity');
 const { normalizeAgent } = require('../src/config');
 
 const identity = buildIdentity([
-  { id: 'architect', displayName: '架构师', aliases: [] },
-  { id: 'codex', displayName: 'codex', aliases: [] },
-  { id: 'kimi', displayName: 'kimi', aliases: [] },
+  { id: 'architect', displayName: 'lead', aliases: [] },
+  { id: 'builder', displayName: 'builder', aliases: [] },
+  { id: 'scout', displayName: 'scout', aliases: [] },
 ].map(normalizeAgent));
-const terminalIds = ['architect', 'codex', 'kimi'];
+const terminalIds = ['architect', 'builder', 'scout'];
 const targets = (sender, content) => core.mentionTargets({ identity, terminalIds }, sender, content).sort();
 
 // ---------- the bug this whole module is shaped around ----------
 
 test('a crew member is never delivered its own group message', () => {
   // Observed in production for months. The bus records the sender as a canonical id
-  // (`architect`) while the local roster knows the display name (`架构师`). Compare the raw
-  // strings and 'architect' !== '架构师' is always true, so the guard never fires and every
+  // (`architect`) while the local roster knows the display name (`lead`). Compare the raw
+  // strings and 'architect' !== 'lead' is always true, so the guard never fires and every
   // message the agent posts is typed straight back into its own window.
-  assert.deepEqual(targets('architect', '@架构师 这是我自己说的话'), []);
+  assert.deepEqual(targets('architect', '@lead a note to myself'), []);
   assert.deepEqual(targets('architect', '@architect talking to myself'), []);
 });
 
 test('...and it hides, because it only misfires for the one whose name differs from its id', () => {
-  // codex and kimi have display name == id, so a naive comparison happens to work for
-  // them. Two thirds of the crew look fine; that is why nobody noticed.
-  assert.deepEqual(targets('codex', '@codex my own words'), []);
-  assert.deepEqual(targets('kimi', '@kimi my own words'), []);
+  // Where a display name happens to equal the id, a naive comparison works by accident.
+  // Only the entries where they differ misfire — so most of a roster looks fine, which is
+  // why this survives review.
+  assert.deepEqual(targets('builder', '@builder my own words'), []);
+  assert.deepEqual(targets('scout', '@scout my own words'), []);
 });
 
 test('a display name as sender is also handled — both spellings normalise', () => {
-  assert.deepEqual(targets('架构师', '@架构师 me again'), []);
+  assert.deepEqual(targets('lead', '@lead me again'), []);
+});
+
+test('display names are not required to be ASCII', () => {
+  // Worth its own case: matching lowercases and does substring work on whatever the roster
+  // says, and a display name in another script is the most likely reason for one to differ
+  // from its id in the first place.
+  const id2 = buildIdentity([
+    { id: 'writer', displayName: 'ünïcodé-nåme', aliases: [] },
+    { id: 'plain', displayName: 'plain', aliases: [] },
+  ].map(normalizeAgent));
+  const t = (sender, content) => core.mentionTargets({ identity: id2, terminalIds: ['writer', 'plain'] }, sender, content);
+  assert.deepEqual(t('human', '@ünïcodé-nåme please look'), ['writer']);
+  assert.deepEqual(t('writer', '@ünïcodé-nåme my own words'), [], 'and the self-guard still holds');
 });
 
 test('everyone else addressed in the same message still gets it', () => {
-  assert.deepEqual(targets('architect', '@架构师 顺带 @codex 你看下'), ['codex']);
-  assert.deepEqual(targets('rina', '@架构师 @codex @kimi 都看一下'), ['architect', 'codex', 'kimi']);
+  assert.deepEqual(targets('architect', '@lead and @builder take a look'), ['builder']);
+  assert.deepEqual(targets('human', '@lead @builder @scout all of you'), ['architect', 'builder', 'scout']);
 });
 
 test('a name without @ is not an address', () => {
-  assert.deepEqual(targets('rina', 'codex 这个词只是出现在句子里'), []);
+  assert.deepEqual(targets('human', 'builder appears in this sentence but is not addressed'), []);
 });
 
 // ---------- busy detection ----------
@@ -82,8 +96,8 @@ test('the queue cap drops the oldest and says which', () => {
 // ---------- envelope ----------
 
 test('the envelope tells the window where the answer goes', () => {
-  const group = core.envelope({ kind: 'group', agent: 'architect', sender: 'rina', content: 'hi' });
-  const dm = core.envelope({ kind: 'dm', agent: 'architect', sender: 'rina', content: 'hi' });
+  const group = core.envelope({ kind: 'group', agent: 'architect', sender: 'human', content: 'hi' });
+  const dm = core.envelope({ kind: 'dm', agent: 'architect', sender: 'human', content: 'hi' });
   assert.match(group, /\[group\]/);
   assert.match(group, /say --as architect/);
   assert.match(dm, /\[direct\]/);
@@ -97,39 +111,39 @@ test('the envelope tells the window where the answer goes', () => {
 // ---------- window resolution ----------
 
 test('a window is found by the identity it claims', () => {
-  const windows = [{ ref: '%1', identity: 'codex' }, { ref: '%2', identity: '架构师' }];
-  assert.deepEqual(core.resolveWindow(windows, '架构师'), { ref: '%2', reason: 'identity' });
+  const windows = [{ ref: '%1', identity: 'builder' }, { ref: '%2', identity: 'lead' }];
+  assert.deepEqual(core.resolveWindow(windows, 'lead'), { ref: '%2', reason: 'identity' });
 });
 
 test('two windows claiming one identity is refused, not guessed', () => {
   // That state means a session was restored without the old window being cleaned up. One
   // of them is a corpse; guessing picks it half the time.
-  const windows = [{ ref: '%1', identity: 'codex' }, { ref: '%2', identity: 'codex' }];
-  const r = core.resolveWindow(windows, 'codex');
+  const windows = [{ ref: '%1', identity: 'builder' }, { ref: '%2', identity: 'builder' }];
+  const r = core.resolveWindow(windows, 'builder');
   assert.equal(r.ref, null);
   assert.equal(r.reason, 'ambiguous');
   assert.deepEqual(r.candidates, ['%1', '%2']);
 });
 
 test('an unclaimed identity reports why, so the caller can wait rather than fail', () => {
-  assert.deepEqual(core.resolveWindow([{ ref: '%1', identity: null }], 'codex'), { ref: null, reason: 'unclaimed' });
+  assert.deepEqual(core.resolveWindow([{ ref: '%1', identity: null }], 'builder'), { ref: null, reason: 'unclaimed' });
 });
 
 // ---------- message identity ----------
 
 test('the same message from either channel has the same key', () => {
-  const fromHistory = { content: 'hello', ts: '2026-08-20T12:00:00Z', metadata: JSON.stringify({ sender: 'rina' }) };
-  const fromStream = { content: 'hello', ts: '2026-08-20T12:00:00Z', metadata: { sender: 'rina' } };
+  const fromHistory = { content: 'hello', ts: '2026-08-20T12:00:00Z', metadata: JSON.stringify({ sender: 'human' }) };
+  const fromStream = { content: 'hello', ts: '2026-08-20T12:00:00Z', metadata: { sender: 'human' } };
   assert.equal(core.messageKey(fromHistory), core.messageKey(fromStream));
 });
 
 test('different messages do not collide', () => {
-  const base = { content: 'hello', ts: '2026-08-20T12:00:00Z', metadata: { sender: 'rina' } };
+  const base = { content: 'hello', ts: '2026-08-20T12:00:00Z', metadata: { sender: 'human' } };
   const keys = new Set([
     core.messageKey(base),
     core.messageKey({ ...base, content: 'hello ' }),
     core.messageKey({ ...base, ts: '2026-08-20T12:00:01Z' }),
-    core.messageKey({ ...base, metadata: { sender: 'codex' } }),
+    core.messageKey({ ...base, metadata: { sender: 'builder' } }),
   ]);
   assert.equal(keys.size, 4);
 });
