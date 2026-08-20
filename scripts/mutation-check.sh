@@ -138,13 +138,23 @@ s = s.replace('if (core.isBusy(screen, pattern)) {', 'if (false) {', 1)
 i = s.index('for (const item of expired) {')
 j = s.index('this._saveState();', i)
 seg = s[i:j]
-seg2 = seg.replace(\"if (item.kind === 'dm' && item.dmId) this._ack(item.dmId, item.agent, 'expired');\", '')
+seg2 = seg.replace(\"if (item.kind === 'dm' && item.dmId) this._queueAck(item.dmId, item.agent, 'expired');\", '')
 assert seg != seg2
 s = s[:i] + seg2 + s[j:]
 "
 "two windows claiming one identity is silently guessed|src/lib/sidecar-core.js|
 s = s.replace('if (claimed.length > 1) {', 'if (false) {', 1)
 s = s.replace('const claimed = windows.filter((w) => w.identity === identityName);', 'const claimed = windows.filter((w) => w.identity === identityName).slice(0, 1);', 1)
+"
+"tmux accepts a mangled pane line instead of refusing it|adapters/terminal/tmux.js|
+i = s.index('  if (parts.length < 3 || !REF_RE.test(parts[0])) {')
+j = s.index('  }', s.index('  );', i)) + len('  }')
+s = s[:i] + s[j:]
+"
+"an undeliverable receipt is dropped instead of retried|src/lib/sidecar.js|
+old = \"    this.state.acks.push({ dmId, agent, status, queuedAt: new Date(this.now()).toISOString() });\"
+assert old in s
+s = s.replace(old, '    this.client.ack(agent, dmId, status).catch(() => {}); return;', 1)
 "
 "mention prefix collisions no longer refused at startup|src/config.js|
 i = s.index('  const all = [...triggers.keys()];')
@@ -202,6 +212,28 @@ const test = require('node:test');
 setInterval(() => {}, 1000);          // a live handle nobody cleans up
 test('fine', () => {});
 PROBE
+
+  # A mutation snippet that fails for ANY reason must announce itself. A crashing snippet
+  # leaves the source untouched, and an untouched source always passes.
+  export WORK="$(mktemp -d)"; mkdir -p "$WORK/src"
+  echo "const a = 1;" > "$WORK/src/x.js"
+  MUT_FILE="src/x.js" MUT_SNIPPET="raise RuntimeError('snippet is broken')" python3 - <<'PY3' >/dev/null 2>&1
+import io, os, sys
+p = os.path.join(os.environ['WORK'], os.environ['MUT_FILE'])
+s = io.open(p, encoding='utf-8').read()
+before = s
+exec(os.environ['MUT_SNIPPET'])
+if s == before:
+    sys.exit(3)
+io.open(p, 'w', encoding='utf-8').write(s)
+PY3
+  if [ $? -ne 0 ]; then
+    printf '  ok       %-42s (non-zero exit)\n' "a crashing mutation is not a survivor"
+  else
+    printf '  BROKEN   %-42s a broken snippet reported success\n' "a crashing mutation is not a survivor"
+    fails=$((fails + 1))
+  fi
+  rm -rf "$WORK"
 
   # A mutation whose pattern has drifted must announce itself, not pass silently.
   export WORK="$(mktemp -d)"; mkdir -p "$WORK/src"
@@ -268,9 +300,17 @@ if s == before:
 io.open(p, 'w', encoding='utf-8').write(s)
 PY
   rc=$?
-  if [ $rc -eq 3 ]; then
+  # ANY non-zero exit means the mutation did not land: 3 is the deliberate "pattern no
+  # longer matches", and anything else is the snippet itself failing. Both leave the source
+  # unchanged, so running the suite afterwards measures nothing and reports SURVIVED — a
+  # green rule looking like an unguarded one, which sends someone off to write a test that
+  # already exists.
+  #
+  # Found the honest way: a function was renamed, a mutation kept the old name, its internal
+  # assertion threw with status 1, and this script called it a survivor.
+  if [ $rc -ne 0 ]; then
     echo "  SKIPPED  $name"
-    echo "           (the mutation no longer matches $file — update it or the check is lying)"
+    echo "           (the mutation did not apply — exit $rc. Update it, or this check is lying.)"
     survivors=$((survivors + 1))
     restore
     continue

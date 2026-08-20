@@ -139,3 +139,28 @@ test('malformed metadata does not throw', () => {
   assert.doesNotThrow(() => core.messageKey({}));
   assert.doesNotThrow(() => core.messageKey(null));
 });
+
+// ---------- the tmux format contract ----------
+
+const { parsePaneLine } = require('../adapters/terminal/tmux');
+
+test('a pane line parses into ref, identity, title', () => {
+  assert.deepEqual(parsePaneLine('%18|:|scout|:|my-host'), { ref: '%18', identity: 'scout', title: 'my-host' });
+  assert.deepEqual(parsePaneLine('%2|:||:|unclaimed'), { ref: '%2', identity: null, title: 'unclaimed' });
+});
+
+test('a title containing the separator cannot corrupt the fields that matter', () => {
+  assert.deepEqual(parsePaneLine('%1|:|scout|:|a|:|b'), { ref: '%1', identity: 'scout', title: 'a|:|b' });
+});
+
+test('a line the terminal escaped differently is refused, not silently mangled', () => {
+  // tmux 3.4 renders a control character in a format string as its four-character escape
+  // while 3.6 emits the raw byte. With a control separator the 3.4 output parses into a
+  // structurally perfect object with every field wrong — the whole line becomes the ref,
+  // every window reads as unclaimed, and nothing is ever delivered to anyone. No error is
+  // raised anywhere. Refusing the line is the difference between a loud failure and a crew
+  // that silently stops receiving mail.
+  assert.throws(() => parsePaneLine(String.raw`%18\001scout\001my-host`), /format contract has changed/);
+  assert.throws(() => parsePaneLine('garbage'), /format contract has changed/);
+  assert.throws(() => parsePaneLine('not-a-ref|:|scout|:|host'), /format contract has changed/);
+});

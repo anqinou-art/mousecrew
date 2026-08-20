@@ -252,3 +252,48 @@ test('a presence report is sent upstream', async () => {
   assert.equal(h.presences.length, 1);
   assert.equal(h.presences[0].codex.state, 'idle');
 });
+
+// ---------- receipts survive a failing endpoint ----------
+
+test('a receipt that cannot be sent is kept and retried, not lost', async () => {
+  // The reason undelivered direct messages are reported at all is that silence looks
+  // exactly like being ignored. A receipt attempted once and dropped on failure puts the
+  // system back in precisely that state — and by then the queue entry is gone, so nothing
+  // would ever try again.
+  const h = primed(harness({ windows: [{ ref: '%1', identity: '架构师', screen: 'busy (esc to interrupt)' }] }));
+  let failing = true;
+  h.sc.client.ack = async (agent, dmId, status) => {
+    if (failing) throw new Error('server unreachable');
+    h.acks.push({ agent, dmId, status });
+  };
+
+  h.sc.ingestDirect({ target: 'architect', dmId: 'dm-9', sender: 'rina', content: 'still there?' });
+  h.advance(11 * 60 * 1000);
+  await h.sc.deliver();
+
+  assert.equal(h.acks.length, 0, 'the send failed');
+  assert.equal(h.sc.state.acks.length, 1, 'and the debt is recorded rather than forgotten');
+  assert.equal(h.of('ack-failed').length, 1);
+
+  failing = false;
+  await h.sc.deliver();
+  assert.deepEqual(h.acks, [{ agent: 'architect', dmId: 'dm-9', status: 'expired' }]);
+  assert.equal(h.sc.state.acks.length, 0, 'and it is only forgotten once it actually landed');
+});
+
+test('an owed receipt survives a restart', async () => {
+  const h = primed(harness({ windows: [{ ref: '%1', identity: '架构师', screen: 'busy (esc to interrupt)' }] }));
+  h.sc.client.ack = async () => { throw new Error('down'); };
+  h.sc.ingestDirect({ target: 'architect', dmId: 'dm-10', sender: 'rina', content: 'hello' });
+  h.advance(11 * 60 * 1000);
+  await h.sc.deliver();
+
+  const sent = [];
+  const revived = new Sidecar({
+    adapter: h.adapter, identity: buildIdentity(CREW), agents: CREW,
+    client: { history: async () => [], ack: async (agent, dmId, status) => { sent.push({ agent, dmId, status }); } },
+    statePath: h.sc.statePath, now: () => 1_000_000,
+  }, { postInjectMs: 0 });
+  await revived.flushAcks();
+  assert.deepEqual(sent, [{ agent: 'architect', dmId: 'dm-10', status: 'expired' }]);
+});

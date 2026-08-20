@@ -50,7 +50,7 @@ class Sidecar extends EventEmitter {
     this.byId = new Map(this.agents.map((a) => [a.id, a]));
 
     this.statePath = deps.statePath || null;
-    this.state = { seen: [], pending: [], bootstrapped: false };
+    this.state = { seen: [], pending: [], acks: [], bootstrapped: false };
     this._timers = [];
     this._draining = new Set();
     this._loadState();
@@ -62,7 +62,7 @@ class Sidecar extends EventEmitter {
     if (!this.statePath) return;
     try {
       const raw = JSON.parse(fs.readFileSync(this.statePath, 'utf8'));
-      this.state = { seen: raw.seen || [], pending: raw.pending || [], bootstrapped: !!raw.bootstrapped };
+      this.state = { seen: raw.seen || [], pending: raw.pending || [], acks: raw.acks || [], bootstrapped: !!raw.bootstrapped };
     } catch { /* first run */ }
   }
 
@@ -140,7 +140,7 @@ class Sidecar extends EventEmitter {
     this.state.pending = kept;
     for (const d of dropped) {
       this.emit('event', { type: 'dropped-overflow', agent: d.agent, kind: d.kind });
-      if (d.kind === 'dm' && d.dmId) this._ack(d.dmId, d.agent, 'expired');
+      if (d.kind === 'dm' && d.dmId) this._queueAck(d.dmId, d.agent, 'expired');
     }
     this.emit('event', { type: 'queued', agent: entry.agent, kind: entry.kind, depth: this.state.pending.length });
     return entry;
@@ -159,16 +159,51 @@ class Sidecar extends EventEmitter {
       // A dropped group message still exists in the group history. A dropped direct
       // message looks, from the sender's side, exactly like being ignored — so that one
       // has to be reported back.
-      if (item.kind === 'dm' && item.dmId) this._ack(item.dmId, item.agent, 'expired');
+      if (item.kind === 'dm' && item.dmId) this._queueAck(item.dmId, item.agent, 'expired');
     }
     this._saveState();
     return expired;
   }
 
-  async _ack(dmId, agent, status) {
+  /**
+   * Record a receipt, then try to send it. Written down first, deliberately.
+   *
+   * The whole reason an undelivered direct message is reported at all is that silence on
+   * the sender's side is indistinguishable from being ignored. A receipt that is attempted
+   * once and dropped on failure lands the system back in exactly that state — with the
+   * added insult that the queue entry is already gone, so nothing will ever retry.
+   *
+   * Fire-and-forget was also untestable in the way that matters: a mutation could delete
+   * the send and go red, but making the send *fail* changed nothing observable. A failure
+   * path with no consequence cannot be asserted, and an assertion you cannot break is
+   * decoration.
+   */
+  _queueAck(dmId, agent, status) {
     if (!this.client.ack) return;
-    try { await this.client.ack(agent, dmId, status); }
-    catch (e) { this.emit('event', { type: 'ack-failed', dmId, status, error: e.message }); }
+    this.state.acks.push({ dmId, agent, status, queuedAt: new Date(this.now()).toISOString() });
+    if (this.state.acks.length > 500) {
+      const dropped = this.state.acks.shift();
+      this.emit('event', { type: 'ack-overflow', dmId: dropped.dmId });
+    }
+    this._saveState();
+  }
+
+  /** Send whatever receipts are owed. Anything that fails stays owed. */
+  async flushAcks() {
+    if (!this.state.acks.length || !this.client.ack) return;
+    const owed = this.state.acks;
+    const remaining = [];
+    for (const a of owed) {
+      try {
+        await this.client.ack(a.agent, a.dmId, a.status);
+        this.emit('event', { type: 'ack-sent', agent: a.agent, dmId: a.dmId, status: a.status });
+      } catch (e) {
+        remaining.push(a);
+        this.emit('event', { type: 'ack-failed', agent: a.agent, dmId: a.dmId, status: a.status, error: e.message });
+      }
+    }
+    this.state.acks = remaining;
+    this._saveState();
   }
 
   /**
@@ -177,6 +212,9 @@ class Sidecar extends EventEmitter {
    */
   async deliver() {
     this.pruneStale();
+    // Receipts owed from earlier passes go out first: a delivery attempt is the only thing
+    // that runs on a timer here, so it is also the retry loop.
+    await this.flushAcks();
     if (!this.state.pending.length) return [];
 
     let windows;
@@ -223,7 +261,7 @@ class Sidecar extends EventEmitter {
         this.state.pending = this.state.pending.filter((p) => p !== item);
         this._saveState();
         this.emit('event', { type: 'injected', agent, ref: found.ref, kind: item.kind, chars: text.length });
-        if (item.kind === 'dm' && item.dmId) await this._ack(item.dmId, agent, 'delivered');
+        if (item.kind === 'dm' && item.dmId) this._queueAck(item.dmId, agent, 'delivered');
         delivered.push({ agent, ref: found.ref, kind: item.kind });
       } catch (e) {
         // Injection failed: keep the item queued. Dropping it here would lose a message
@@ -233,6 +271,7 @@ class Sidecar extends EventEmitter {
         this._draining.delete(agent);
       }
     }
+    await this.flushAcks();
     return delivered;
   }
 

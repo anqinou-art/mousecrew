@@ -13,7 +13,23 @@
 const { execFile } = require('child_process');
 
 const IDENT_OPT = '@mousecrew_identity';
-const FIELD_SEP = '';   // pane titles can contain anything printable; this cannot
+// Printable, on purpose. The obvious choice is a control character — a pane title can
+// contain anything printable, so 0x01 looks unambiguous. It is not: tmux 3.4 renders a
+// control character in a format string as its four-character escape (\001), while 3.6
+// emits the raw byte. Same code, same format string, a different answer per version.
+//
+// That failure mode is the worst available: no error, no empty result — a full set of
+// structurally valid objects with every field wrong, because the entire line lands in the
+// first one. Every window then reads as unclaimed, every delivery waits for a window that
+// will never be found, and the dashboard reports the whole crew as stopped.
+//
+// It was invisible on the machine this was written on, whose tmux happened to be new
+// enough. It took running the suite on the other machine to see it at all.
+//
+// (The old value was also a raw 0x01 byte sitting in the source, invisible in every editor.
+// A separator you cannot see is a separator nobody can review.)
+const FIELD_SEP = '|:|';
+const REF_RE = /^%\d+$/;
 
 function run(args, { timeoutMs = 5000 } = {}) {
   return new Promise((resolve, reject) => {
@@ -25,6 +41,31 @@ function run(args, { timeoutMs = 5000 } = {}) {
       resolve(String(stdout));
     });
   });
+}
+
+/**
+ * One line of `list-panes` output into a window record.
+ *
+ * Refuses rather than guesses. A line that does not parse means the format contract with
+ * tmux has broken — a version escaping differently, an option someone changed — and that is
+ * systemic, not one odd window. One loud error beats a dozen quiet wrong answers, which is
+ * precisely what the previous version produced.
+ *
+ * The title is joined back from whatever remains, so a pane title containing the separator
+ * cannot corrupt the two fields that matter.
+ */
+function parsePaneLine(line) {
+  const parts = String(line).split(FIELD_SEP);
+  if (parts.length < 3 || !REF_RE.test(parts[0])) {
+    throw new Error(
+      'tmux adapter: cannot parse a pane line — the format contract has changed.\n' +
+      `  got: ${JSON.stringify(line)}\n` +
+      `  expected: <pane-id>${FIELD_SEP}<identity>${FIELD_SEP}<title>\n` +
+      '  (tmux versions differ in how they render separators — see the note above FIELD_SEP)',
+    );
+  }
+  const [ref, identity] = parts;
+  return { ref, identity: identity || null, title: parts.slice(2).join(FIELD_SEP) || null };
 }
 
 function createTmuxAdapter({ exec = run } = {}) {
@@ -55,10 +96,7 @@ function createTmuxAdapter({ exec = run } = {}) {
         if (/no server running/i.test(e.stderr || e.message)) return [];
         throw e;
       }
-      return out.split('\n').filter(Boolean).map((line) => {
-        const [ref, identity, title] = line.split(FIELD_SEP);
-        return { ref, identity: identity || null, title: title || null };
-      });
+      return out.split('\n').filter(Boolean).map(parsePaneLine);
     },
 
     async setIdentity(ref, identity) {
@@ -95,4 +133,4 @@ function createTmuxAdapter({ exec = run } = {}) {
   };
 }
 
-module.exports = { createTmuxAdapter, IDENT_OPT, FIELD_SEP };
+module.exports = { createTmuxAdapter, parsePaneLine, IDENT_OPT, FIELD_SEP, REF_RE };
