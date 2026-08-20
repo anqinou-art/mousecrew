@@ -1,0 +1,43 @@
+{
+  "host": "127.0.0.1",
+  "port": 8787,
+  "dbPath": "./data/agentdesk.db",
+  "archivePath": "./data/group-archive.jsonl",
+
+  "// tokenFile": "Bearer token for every API call. Keep this file OUTSIDE any git tree, mode 0600.",
+  "tokenFile": "~/.config/agentdesk/auth.json",
+
+  "// nudge": "Chase whoever currently owes an action on an open order.",
+  "nudge": {
+    "enabled": true,
+    "scanMs": 300000,
+    "idleMs": 600000,
+    "dedupMs": 1800000
+  },
+
+  "// delivery": "Terminal-window agents only: back-pressure and the staleness cutoff.",
+  "delivery": {
+    "stalePendingMs": 600000,
+    "maxPending": 200
+  },
+
+  "// contextWatch": "Warn an agent when its context window is close to full.",
+  "contextWatch": {
+    "enabled": true,
+    "thresholdTurns": 10,
+    "noHandoff": ["clerk"],
+    "handoffDir": "./data/handoff"
+  },
+
+  "// notify": "How to reach the human. 'none' | 'webhook' (POST {title, body}).",
+  "notify": {
+    "type": "none",
+    "url": ""
+  },
+
+  "// remoteBridge": "WebSocket endpoint for agents running on another machine.",
+  "remoteBridge": {
+    "enabled": true,
+    "reconnectWaitMs": 60000
+  }
+}

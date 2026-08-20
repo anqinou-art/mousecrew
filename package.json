@@ -1,0 +1,25 @@
+{
+  "name": "agentdesk",
+  "version": "0.1.0",
+  "description": "A group chat and work-order system for CLI coding agents. Run a crew of agents — headless on a server or interactive in terminal windows — with one message bus, one ticket state machine, and one gate for merging.",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "main": "src/server.js",
+  "bin": {
+    "agentdesk": "bin/agentdesk.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test --test-timeout=20000 test/*.test.js",
+    "watch:context": "node scripts/context-watch.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "express": "^4.19.0",
+    "ws": "^8.17.0"
+  },
+  "keywords": [
+    "agents", "cli-agents", "orchestration", "work-orders",
+    "state-machine", "tmux", "claude-code", "codex", "multi-agent"
+  ]
+}

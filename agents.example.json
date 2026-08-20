@@ -1,0 +1,77 @@
+{
+  "// note": [
+    "One entry per crew member. `id` is what the machine uses; `displayName` is what people type after @.",
+    "Workspace ownership is enforced, not just documented: an agent may only be assigned work whose",
+    "`repo` appears in its `repos` list. See docs/OWNERSHIP.md for why."
+  ],
+
+  "agents": [
+    {
+      "id": "backend",
+      "displayName": "backend",
+      "aliases": ["be", "server"],
+      "transport": "local",
+      "runner": "claude",
+      "model": "claude-sonnet-4-6",
+      "workDir": "~/myproject-dev",
+      "repos": ["myproject"],
+      "canMerge": false,
+      "idleTimeoutMs": 1800000,
+      "contextLimit": 200000,
+      "contextWatch": true
+    },
+    {
+      "id": "auditor",
+      "displayName": "auditor",
+      "aliases": ["review"],
+      "transport": "local",
+      "runner": "claude",
+      "model": "claude-sonnet-4-6",
+      "workDir": "~/myproject-audit",
+      "repos": ["myproject"],
+      "// canMerge": "Exactly one agent should have this. It is the single merge gate.",
+      "canMerge": true,
+      "idleTimeoutMs": 1800000,
+      "contextLimit": 200000,
+      "contextWatch": true
+    },
+    {
+      "id": "frontend",
+      "displayName": "frontend",
+      "aliases": ["fe", "app"],
+      "// transport": "remote = runs on another machine via the WebSocket bridge (bin/agentdesk-worker.js).",
+      "transport": "remote",
+      "repos": ["myapp"],
+      "canMerge": false,
+      "// selfManaged": "Skips the audit lane: submitted -> accepted by a human, never auditing.",
+      "selfManaged": true
+    },
+    {
+      "id": "scout",
+      "displayName": "scout",
+      "aliases": [],
+      "// transport": "terminal = an interactive TUI you also use. Needs the terminal adapter (batch 2).",
+      "transport": "terminal",
+      "terminal": { "adapter": "tmux", "target": "scout" },
+      "repos": ["myproject"],
+      "canMerge": false
+    },
+    {
+      "id": "runner",
+      "displayName": "runner",
+      "aliases": [],
+      "// runner:exec": "Generic adapter — any CLI that reads a prompt on stdin and prints a reply.",
+      "transport": "local",
+      "runner": "exec",
+      "exec": {
+        "command": "my-agent-cli",
+        "args": ["--quiet"],
+        "promptOn": "stdin"
+      },
+      "workDir": "~/myproject-dev",
+      "repos": ["myproject"],
+      "canMerge": false,
+      "idleTimeoutMs": 600000
+    }
+  ]
+}
