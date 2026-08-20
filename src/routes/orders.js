@@ -115,12 +115,24 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
       if (!verdict.ok) return res.status(403).json({ error: verdict.reason });
     }
 
-    // A self-managed lane never enters auditing — a human accepts it instead. Refusing
-    // here beats letting the order sit in a queue whose reviewer physically cannot reach
-    // the machine the work lives on.
+    // The two lanes are mutually exclusive, and BOTH directions have to be closed.
+    //
+    // Guarding only one of them is how a gate ends up manned at the front door with the
+    // side door open: block "self-managed work must not enter review" and you still leave
+    // `submitted -> accepted -> closed`, which reaches a terminal state with no review in
+    // its timeline at all. The merge-gate check above never fires, because that path
+    // never touches `auditing` or `pending_restart`.
     if (to_status === 'auditing' && workspace.isSelfManaged(o.assignee)) {
       return res.status(409).json({
         error: `"${o.assignee}" is self-managed: this order ends at submitted and is accepted by a person, not the audit lane`,
+      });
+    }
+    if (to_status === 'accepted' && !workspace.isSelfManaged(o.assignee) && workspace.mergeGate) {
+      // The escape hatch is deliberate: with no merge gate configured there is nothing to
+      // bypass, and a solo setup would otherwise have no way to finish an order at all.
+      return res.status(409).json({
+        error: `"${o.assignee || 'unassigned'}" is not a self-managed lane: this order goes through review `
+             + `(submitted -> auditing), not straight to accepted. Cancel it with -> closed if it should not ship.`,
       });
     }
 
@@ -221,17 +233,27 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     const result = transition(store, o.id, 'in_progress', actor || 'unknown', 'resumed');
     if (!result.ok) return res.status(400).json({ error: result.error });
     store.order.setBlockFields.run(null, null, o.id);
-    card({ order_id: o.id, title: o.title, from_status: 'paused', to_status: 'in_progress', actor, assignee: o.assignee });
+    // from_status comes from the row, not from an assumption. Resume is reachable from
+    // more than one state, and a card that says "paused" for an order that was rejected
+    // puts a false history in front of a human while the timeline says something else.
+    card({ order_id: o.id, title: o.title, from_status: o.status, to_status: 'in_progress', actor, assignee: o.assignee });
     wakeAssignee(result.order, `unblocked — back to ${o.id} (${o.title}).`);
     res.json(store.order.getById.get(o.id));
   });
 
   // ---------- assignment ----------
 
+  const TERMINAL = new Set(['closed', 'accepted']);
+
   router.post('/api/orders/:id/assign', (req, res) => {
     const { assignee, actor } = req.body || {};
     const o = store.order.getById.get(req.params.id);
     if (!o) return res.status(404).json({ error: 'order not found' });
+    // Reassigning finished work rewrites who did it. The row would say one thing and the
+    // timeline another, and the timeline is the part nobody re-reads.
+    if (TERMINAL.has(o.status)) {
+      return res.status(409).json({ error: `${o.id} is ${o.status}; reassigning finished work would rewrite who did it` });
+    }
     const verdict = workspace.canWork(assignee, o.repo);
     if (!verdict.ok) return res.status(409).json({ error: verdict.reason, owners: workspace.ownersOf(o.repo) });
     store.order.setAssignee.run(assignee, o.id);
@@ -243,6 +265,18 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
 
   router.post('/api/orders/restart-done', (req, res) => {
     const { actor } = req.body || {};
+    // Closing the restart queue asserts "the restart happened". Restarting is a human
+    // act, so a human (any actor not on the roster) may say so, and the merge gate may
+    // say so — but a working agent must not be able to wipe the queue that tracks whether
+    // its own merged work is live yet. The damage is not a bad merge; it is the record of
+    // what is still waiting quietly disappearing.
+    const actorId = identity.normalizeAgentId(actor);
+    const isAgent = !!workspace.get(actorId);
+    if (isAgent && !workspace.canMerge(actorId).ok) {
+      return res.status(403).json({
+        error: `"${actorId}" may not close the restart queue — that is for whoever performed the restart`,
+      });
+    }
     const closed = [];
     for (const o of store.order.getByStatus.all('pending_restart')) {
       const r = transition(store, o.id, 'closed', actor || 'system', 'closed after restart');

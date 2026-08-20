@@ -22,6 +22,25 @@ function createDispatcher({ manager, identity, hub, workspace, config }) {
   // the message exists in the group — which post() already did.
   function isPulled(cfg) { return cfg.transport === 'terminal'; }
 
+  /**
+   * Has this instruction gone stale while it waited? Same fail-open contract as the local
+   * queue: only an explicit "skip" drops it, and anything unexpected delivers.
+   */
+  function isStale(freshness, id) {
+    if (typeof freshness !== 'function') return false;
+    let verdict;
+    try { verdict = freshness(); }
+    catch (e) {
+      console.error(`[dispatch] ${id} freshness check threw, delivering anyway: ${e.message}`);
+      return false;
+    }
+    if (verdict && verdict.skip) {
+      console.log(`[dispatch] ${id} dropping stale message: ${verdict.reason || 'stale'}`);
+      return true;
+    }
+    return false;
+  }
+
   async function dispatchRemote(id, cfg, text, senderDisplay, reDispatch) {
     const remote = manager.remotes.get(id);
     const formatted = `[group] ${senderDisplay}: ${text}`;
@@ -70,12 +89,21 @@ function createDispatcher({ manager, identity, hub, workspace, config }) {
     if (isPulled(cfg)) return '';                   // already in the group; its sidecar takes it
 
     if (cfg.transport === 'remote') {
+      // Remote is a push transport, so the staleness check has to happen here — there is
+      // no local queue to do it on the way out. Skipping it would leave exactly one
+      // transport delivering instructions that everyone else knows are dead.
+      if (isStale(freshness, id)) return '';
+
       const remote = manager.remotes.get(id);
       if (remote && remote.online && remote.sendFn) {
         return dispatchRemote(id, cfg, text, senderDisplay, reDispatch);
       }
       hub.broadcast({ type: 'waiting', sender: id });
       const back = await manager.waitForRemote(id, reconnectWaitMs);
+      // Check again after the wait. This is the window that actually produces stale
+      // wake-ups: up to a minute passed while the worker was away, which is plenty of
+      // time for the order to have been submitted, reviewed, or cancelled.
+      if (isStale(freshness, id)) return '';
       if (back && manager.remotes.get(id) && manager.remotes.get(id).sendFn) {
         return dispatchRemote(id, cfg, text, senderDisplay, reDispatch);
       }
@@ -116,11 +144,14 @@ function createDispatcher({ manager, identity, hub, workspace, config }) {
     return targets;
   }
 
-  bus.on('group:dispatch_mentions', ({ content, sender, freshness }) => {
+  // Same reasoning as GroupHub.detach(): a global subscription needs a way off the bus.
+  const onDispatchMentions = ({ content, sender, freshness }) => {
     dispatchMentions(content, sender, { reDispatch: false, freshness });
-  });
+  };
+  bus.on('group:dispatch_mentions', onDispatchMentions);
+  const detach = () => bus.off('group:dispatch_mentions', onDispatchMentions);
 
-  return { dispatchTo, dispatchMentions, fireReplyDispatches };
+  return { dispatchTo, dispatchMentions, fireReplyDispatches, detach };
 }
 
 module.exports = { createDispatcher };

@@ -19,8 +19,22 @@ class GroupHub {
     this.channel = channel;
     this.clients = new Set();
 
-    bus.on('group:post', (payload) => this.post(payload));
-    bus.on('group:broadcast', (data) => this.broadcast(data));
+    // Kept as fields so they can be removed again. A module that subscribes to a global
+    // bus with no way to unsubscribe cannot be instantiated twice — the second instance
+    // does not replace the first, it joins it, and every emit then also reaches the hub
+    // whose database is already closed. Long-lived servers never notice; anything that
+    // builds the app more than once (tests, an embedded instance) hits it immediately.
+    this._onPost = (payload) => this.post(payload);
+    this._onBroadcast = (data) => this.broadcast(data);
+    bus.on('group:post', this._onPost);
+    bus.on('group:broadcast', this._onBroadcast);
+  }
+
+  /** Unsubscribe from the bus and drop stream clients. Safe to call twice. */
+  detach() {
+    bus.off('group:post', this._onPost);
+    bus.off('group:broadcast', this._onBroadcast);
+    this.clients.clear();
   }
 
   broadcast(data) {

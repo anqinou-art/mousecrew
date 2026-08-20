@@ -229,7 +229,8 @@ Stated plainly, because you will meet them.
   receipt — but "your message was dropped because you were working" is not solved. Headless
   agents queue instead and are unaffected.
 - **Transitions record the actor but do not authenticate them.** Anyone with the token can
-  act as anyone. Repo ownership and the merge gate *are* enforced; identity is not.
+  act as anyone. Repo ownership and the merge gate *are* enforced — but on a *claimed*
+  identity, so the gate stops an honest mistake, not a caller who names someone else.
 - **Group history is capped at 200 messages per request.** A client offline long enough to
   fall further behind than that cannot recover the gap from this endpoint.
 - **The group stream has no server-side delivery guarantee.** Clients must reconcile
@@ -255,6 +256,24 @@ The suite is the specification for everything above that is stated as a rule: th
 self-wake guard, the ownership refusal, the single merge gate, every state edge including
 the ones that must be refused, fail-open vs fail-closed, merge-commit file lists, the
 lifecycle under a stubbed CLI, and the turns-remaining arithmetic.
+
+**Rules are tested at the route, not only as functions.** A suite of unit tests can prove
+every decision is correct while a handler quietly stops asking for one — delete an
+enforcement point and a function-only suite stays green with the gate wide open. So
+`test/routes.test.js` speaks HTTP, and each of these mutations turns it red:
+
+| mutation | result |
+|---|---|
+| delete the merge-gate check from the route | fails |
+| delete the accepted-lane guard (audit bypass) | fails |
+| delete the ownership check from create | fails |
+| make the token guard fail open | fails |
+| stop passing staleness through to local dispatch | fails |
+| stop passing staleness through to remote dispatch | fails |
+
+Cleanup is registered with `t.after()` rather than at the end of each test body: a suite
+that hangs the moment it goes red is barely easier to read than one that never goes red,
+because you cannot tell "broken" from "stuck".
 
 ## License
 

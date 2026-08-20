@@ -84,6 +84,8 @@ function start(opts = {}) {
   });
 
   const shutdown = () => {
+    ctx.hub.detach();
+    ctx.dispatcher.detach();
     console.log('\nshutting down');
     ctx.nudger.stop();
     ctx.manager.destroyAll();

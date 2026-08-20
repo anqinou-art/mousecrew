@@ -1,0 +1,274 @@
+const test = require('node:test');
+const assert = require('node:assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const http = require('http');
+const { build } = require('../src/server');
+const { normalizeAgent } = require('../src/config');
+
+// Route-level tests.
+//
+// Everything else in this suite proves the *decisions* are right: canWork says no,
+// canMerge says no, the state table refuses an edge. None of that proves the decision is
+// actually consulted on the way through. Delete a check from a handler and a suite made
+// only of unit tests stays green while the gate is wide open.
+//
+// So these tests speak HTTP. If an enforcement point is removed from a route, one of them
+// goes red.
+
+const TOKEN = 'test-token-abcdefghijklmnop';
+
+// Terminal transport on purpose: dispatch treats those as pull-mode and returns without
+// touching a process, so no test ever spawns a CLI.
+const CREW = [
+  { id: 'backend', transport: 'terminal', terminal: { adapter: 'none' }, repos: ['server'] },
+  { id: 'auditor', transport: 'terminal', terminal: { adapter: 'none' }, repos: ['server'], canMerge: true },
+  { id: 'frontend', transport: 'terminal', terminal: { adapter: 'none' }, repos: ['app'], selfManaged: true },
+].map(normalizeAgent);
+
+// `t` is required: cleanup is registered with t.after() so it runs even when an
+// assertion throws. Without that, a failing test leaves its HTTP server listening and the
+// runner never exits — a suite that hangs the moment it goes red is barely more useful
+// than one that never goes red at all, because you cannot tell the two apart.
+async function boot(t, crew = CREW) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentdesk-routes-'));
+  const tokenFile = path.join(dir, 'auth.json');
+  fs.writeFileSync(tokenFile, JSON.stringify({ token: TOKEN }));
+  fs.chmodSync(tokenFile, 0o600);
+
+  const config = {
+    host: '127.0.0.1', port: 0,
+    dbPath: path.join(dir, 'test.db'),
+    archivePath: path.join(dir, 'archive.jsonl'),
+    tokenFile,
+    nudge: { enabled: false }, delivery: {}, contextWatch: { enabled: false },
+    notify: { type: 'none' }, remoteBridge: { enabled: false },
+  };
+  const ctx = build({ config, agents: crew });
+  const server = http.createServer(ctx.app);
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  const call = async (method, route, body, { token = TOKEN } = {}) => {
+    const res = await fetch(base + route, {
+      method,
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    let json = null;
+    try { json = await res.json(); } catch { /* empty body */ }
+    return { status: res.status, body: json };
+  };
+
+  const close = () => new Promise((r) => {
+    // Detach before closing the store: the hub and dispatcher are subscribed to a
+    // module-level bus, and a later test's emit would otherwise reach this closed one.
+    ctx.hub.detach();
+    ctx.dispatcher.detach();
+    ctx.manager.destroyAll();
+    ctx.store.close();
+    // fetch() keeps its sockets alive, and server.close() waits for every one of them —
+    // without this the suite hangs after the last assertion passes.
+    if (server.closeAllConnections) server.closeAllConnections();
+    server.close(r);
+  });
+  t.after(close);
+  return { call, ctx };
+}
+
+/** Create an order and put it in a given state without going through the guarded routes. */
+function place(ctx, id, status) {
+  ctx.store.db.prepare('UPDATE work_orders SET status = ? WHERE id = ?').run(status, id);
+}
+
+async function newOrder(call, { assignee, repo, title = 'a task' }) {
+  const r = await call('POST', '/api/orders', { title, assignee, repo, actor: 'human' });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  return r.body.id;
+}
+
+// ---------- the door ----------
+
+test('every route requires a token', async (t) => {
+  const { call } = await boot(t);
+  for (const [method, route] of [['GET', '/api/orders'], ['POST', '/api/orders'], ['GET', '/api/agents/status'], ['GET', '/api/group/history']]) {
+    const r = await call(method, route, method === 'POST' ? { title: 'x' } : undefined, { token: null });
+    assert.equal(r.status, 401, `${method} ${route} should require a token`);
+  }
+  const bad = await call('GET', '/api/orders', undefined, { token: 'wrong-token-same-length!!' });
+  assert.equal(bad.status, 401);
+});
+
+// ---------- ownership, at the route ----------
+
+test('creating an order across a repo boundary is refused by the route', async (t) => {
+  const { call } = await boot(t);
+  const r = await call('POST', '/api/orders', { title: 'wrong tree', assignee: 'frontend', repo: 'server', actor: 'human' });
+  assert.equal(r.status, 409);
+  assert.match(r.body.error, /does not own repo "server"/);
+  assert.deepEqual(r.body.owners.sort(), ['auditor', 'backend']);
+});
+
+test('reassigning across a repo boundary is refused by the route', async (t) => {
+  const { call } = await boot(t);
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  const r = await call('POST', `/api/orders/${id}/assign`, { assignee: 'frontend', actor: 'human' });
+  assert.equal(r.status, 409);
+});
+
+test('finished work cannot be reassigned', async (t) => {
+  const { call, ctx } = await boot(t);
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  place(ctx, id, 'closed');
+  const r = await call('POST', `/api/orders/${id}/assign`, { assignee: 'auditor', actor: 'human' });
+  assert.equal(r.status, 409);
+  assert.match(r.body.error, /reassigning finished work/);
+});
+
+// ---------- the merge gate, at the route ----------
+
+test('a non-gate agent cannot take an order past review', async (t) => {
+  const { call, ctx } = await boot(t);
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  place(ctx, id, 'auditing');
+
+  const viaRestart = await call('POST', `/api/orders/${id}/transition`, { to_status: 'pending_restart', actor: 'backend' });
+  assert.equal(viaRestart.status, 403);
+
+  const viaClose = await call('POST', `/api/orders/${id}/transition`, { to_status: 'closed', actor: 'backend' });
+  assert.equal(viaClose.status, 403);
+
+  const asGate = await call('POST', `/api/orders/${id}/transition`, { to_status: 'pending_restart', actor: 'auditor' });
+  assert.equal(asGate.status, 200);
+});
+
+test('the audit lane cannot be bypassed through accepted', async (t) => {
+  // The side door. Guarding only "self-managed must not enter review" leaves
+  // submitted -> accepted -> closed, which reaches a terminal state with no review in its
+  // timeline, and never touches the states the merge-gate check watches.
+  const { call, ctx } = await boot(t);
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  place(ctx, id, 'submitted');
+
+  const r = await call('POST', `/api/orders/${id}/transition`, { to_status: 'accepted', actor: 'backend' });
+  assert.equal(r.status, 409, 'a non-self-managed order must not go straight to accepted');
+  assert.match(r.body.error, /goes through review/);
+
+  const stillThere = await call('GET', `/api/orders/${id}`);
+  assert.equal(stillThere.body.status, 'submitted');
+});
+
+test('a self-managed lane still ends at human acceptance', async (t) => {
+  const { call, ctx } = await boot(t);
+  const id = await newOrder(call, { assignee: 'frontend', repo: 'app' });
+  place(ctx, id, 'submitted');
+
+  const accepted = await call('POST', `/api/orders/${id}/transition`, { to_status: 'accepted', actor: 'human' });
+  assert.equal(accepted.status, 200);
+  const closed = await call('POST', `/api/orders/${id}/transition`, { to_status: 'closed', actor: 'human' });
+  assert.equal(closed.status, 200);
+});
+
+test('a self-managed lane is kept out of review', async (t) => {
+  const { call, ctx } = await boot(t);
+  const id = await newOrder(call, { assignee: 'frontend', repo: 'app' });
+  place(ctx, id, 'submitted');
+  const r = await call('POST', `/api/orders/${id}/transition`, { to_status: 'auditing', actor: 'auditor' });
+  assert.equal(r.status, 409);
+});
+
+test('with no merge gate configured, accepted stays open — the solo escape hatch', async (t) => {
+  // Refusing here would leave a one-agent setup with no way to finish anything: the audit
+  // lane needs a gate that does not exist. A rule that traps its user gets routed around.
+  const solo = [normalizeAgent({ id: 'solo', transport: 'terminal', terminal: { adapter: 'none' } })];
+  const { call, ctx } = await boot(t, solo);
+  const id = await newOrder(call, { assignee: 'solo' });
+  place(ctx, id, 'submitted');
+  const r = await call('POST', `/api/orders/${id}/transition`, { to_status: 'accepted', actor: 'human' });
+  assert.equal(r.status, 200);
+});
+
+test('a working agent cannot wipe the restart queue', async (t) => {
+  // Not about bad merges — the merge already happened. It is about the record of what is
+  // still waiting to go live quietly disappearing.
+  const { call, ctx } = await boot(t);
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  place(ctx, id, 'pending_restart');
+
+  const byAgent = await call('POST', '/api/orders/restart-done', { actor: 'backend' });
+  assert.equal(byAgent.status, 403);
+  assert.equal((await call('GET', `/api/orders/${id}`)).body.status, 'pending_restart');
+
+  const byHuman = await call('POST', '/api/orders/restart-done', { actor: 'ops-person' });
+  assert.equal(byHuman.status, 200);
+  assert.deepEqual(byHuman.body.closed, [id]);
+});
+
+// ---------- the rest of the lane ----------
+
+test('an illegal edge is refused before anything else happens', async (t) => {
+  const { call } = await boot(t);
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  const r = await call('POST', `/api/orders/${id}/transition`, { to_status: 'closed', actor: 'human' });
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /draft -> closed not allowed/);
+});
+
+test('blocking on an order that does not exist is refused', async (t) => {
+  const { call, ctx } = await boot(t);
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  place(ctx, id, 'in_progress');
+  const r = await call('POST', `/api/orders/${id}/pause`, { actor: 'human', blocked_by: 'WO-999', reason: 'typo' });
+  assert.equal(r.status, 400);
+});
+
+test('the card a human sees says where the order actually came from', async (t) => {
+  // The row and the broadcast must not disagree. A card that claims "paused" for an order
+  // that was rejected puts a false history in front of the one reader who will not go and
+  // check the timeline.
+  const { call, ctx } = await boot(t);
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  place(ctx, id, 'rejected');
+
+  const cards = [];
+  ctx.hub.addClient({ write: (s) => { try { cards.push(JSON.parse(s.replace(/^data: /, ''))); } catch {} } });
+  await call('POST', `/api/orders/${id}/resume`, { actor: 'human' });
+
+  const card = cards.find((c) => c.type === 'order_card' && c.order_id === id);
+  assert.ok(card, 'a card was broadcast');
+  assert.equal(card.from_status, 'rejected');
+
+  const tl = (await call('GET', `/api/orders/${id}`)).body.timeline;
+  assert.equal(tl[tl.length - 1].from, card.from_status, 'the card and the timeline agree');
+});
+
+test('a group message reaches the group and names its author canonically', async (t) => {
+  const { call } = await boot(t);
+  const posted = await call('POST', '/api/group/post', { sender: 'backend', content: 'looking at it now', reDispatch: false });
+  assert.equal(posted.status, 200);
+  assert.equal(posted.body.sender, 'backend');
+
+  const history = await call('GET', '/api/group/history?limit=10');
+  const last = history.body.messages[history.body.messages.length - 1];
+  assert.equal(last.content, 'looking at it now');
+  assert.equal(JSON.parse(last.metadata).sender, 'backend');
+});
+
+test('agent status is reported for every crew member', async (t) => {
+  const { call } = await boot(t);
+  const s = (await call('GET', '/api/agents/status')).body;
+  assert.deepEqual(Object.keys(s).sort(), ['auditor', 'backend', 'frontend']);
+});
+
+test('presence only accepts crew members that are actually terminal agents', async (t) => {
+  const { call } = await boot(t);
+  const r = await call('POST', '/api/agents/presence', {
+    agents: { backend: { state: 'busy' }, 'not-on-the-roster': { state: 'idle' } },
+  });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.accepted, ['backend']);
+  const s = (await call('GET', '/api/agents/status')).body;
+  assert.equal(s.backend.state, 'busy');
+  assert.ok(!('not-on-the-roster' in s));
+});
