@@ -127,6 +127,16 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
         error: `"${o.assignee}" is self-managed: this order ends at submitted and is accepted by a person, not the audit lane`,
       });
     }
+    // Same reasoning, other cause: with no merge gate configured nobody is allowed to take
+    // an order out of review, so entering review is a one-way door — the only exit left is
+    // `rejected`. Refusing at the entrance beats letting the order sit in a queue that has
+    // no one who can clear it, which is exactly the argument three lines above.
+    if (to_status === 'auditing' && !workspace.mergeGate) {
+      return res.status(409).json({
+        error: 'no agent has canMerge:true, so nothing can leave review — set a merge gate, '
+             + 'or take this lane through accepted instead',
+      });
+    }
     if (to_status === 'accepted' && !workspace.isSelfManaged(o.assignee) && workspace.mergeGate) {
       // The escape hatch is deliberate: with no merge gate configured there is nothing to
       // bypass, and a solo setup would otherwise have no way to finish an order at all.

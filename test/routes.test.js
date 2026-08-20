@@ -189,6 +189,32 @@ test('with no merge gate configured, accepted stays open — the solo escape hat
   assert.equal(r.status, 200);
 });
 
+test('with no merge gate, review is refused at the entrance, not at the exit', async (t) => {
+  // The other half of the solo escape hatch. If nobody may take an order out of review,
+  // letting it in creates a one-way door whose only exit is `rejected` — the order enters
+  // on a 200 and then cannot leave. Refuse at the entrance, for the same reason a
+  // self-managed lane is refused there: do not park work in a queue no one can clear.
+  const solo = [normalizeAgent({ id: 'solo', transport: 'terminal', terminal: { adapter: 'none' } })];
+  const { call, ctx } = await boot(t, solo);
+  const id = await newOrder(call, { assignee: 'solo' });
+  place(ctx, id, 'submitted');
+
+  const r = await call('POST', `/api/orders/${id}/transition`, { to_status: 'auditing', actor: 'human' });
+  assert.equal(r.status, 409);
+  assert.match(r.body.error, /nothing can leave review/);
+  assert.equal((await call('GET', `/api/orders/${id}`)).body.status, 'submitted');
+});
+
+test('with a merge gate, review is of course still open', async (t) => {
+  // Companion assertion: proves the rule above is about the missing gate, not about
+  // review being closed in general.
+  const { call, ctx } = await boot(t);
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  place(ctx, id, 'submitted');
+  const r = await call('POST', `/api/orders/${id}/transition`, { to_status: 'auditing', actor: 'auditor' });
+  assert.equal(r.status, 200);
+});
+
 test('a working agent cannot wipe the restart queue', async (t) => {
   // Not about bad merges — the merge already happened. It is about the record of what is
   // still waiting to go live quietly disappearing.
