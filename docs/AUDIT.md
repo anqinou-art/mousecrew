@@ -29,6 +29,26 @@ expected: annotating a review necessarily happens after it.
 not to update this sha. A sha here that was never actually reviewed is worse than no sha
 at all — it spends credit that was never earned.
 
+## What has landed since, and how it was covered
+
+Applying that rule to this repo's own history, rather than leaving the reader to work it
+out from the log:
+
+- **The terminal adapter and sidecar** were built after that sha and reviewed on their own
+  — the review found two, both fixed in `e2487c7`: a tmux format string that two tmux
+  versions render differently (every window read as unclaimed on the older one, with no
+  error anywhere), and an expiry receipt that could be lost by a failed send. That review
+  is not folded into the sha above, because a sha should name a commit somebody actually
+  read end to end.
+- **One later change touches `src/`**: a separator in `sidecar-core.js` rewritten from a
+  literal NUL byte to the same byte as an escape, with `.gitattributes` marking `*.js`
+  diffable. Behaviour is identical — and it exists because the literal made git call that
+  file binary, which made the `git diff` above answer "Binary files differ" for it and
+  nothing else. The command this section tells you to trust was blind on one file, in the
+  direction that reads as clean.
+
+Everything else after the sha is documentation.
+
 ---
 
 ## Knowingly deferred

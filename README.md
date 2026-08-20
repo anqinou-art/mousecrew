@@ -242,6 +242,10 @@ git log --oneline 2fc5575..HEAD    # what landed after the review
 knowingly left alone. Writing the sha down is the point: *"nothing changed behind the
 reviewers' backs"* is a claim, and the diff is a fact.
 
+The terminal adapter was built after that sha and reviewed separately; the same file says
+what that review found and what else has touched `src/` since, rather than quietly moving
+the sha forward.
+
 ## Known limitations
 
 Stated plainly, because you will meet them.
