@@ -1,0 +1,5 @@
+# Source stays diffable even when it contains a byte git would call binary.
+# One stray control character (a NUL used as a separator) is enough to make git
+# answer "Binary files differ" for a whole file — silently blinding the very
+# command docs/AUDIT.md tells reviewers to run.
+*.js diff
