@@ -125,6 +125,27 @@ s = s.replace(\"      if (isStale(freshness, id)) return '';\n      if (back\", 
 "self-dispatch guard removed (an agent can wake itself)|src/lib/identity.js|
 s = s.replace('      if (t.id === senderId) continue;', '', 1)
 "
+"sidecar stops normalising the sender (an agent gets its own messages)|src/lib/sidecar-core.js|
+s = s.replace('const senderId = identity.normalizeAgentId(sender);', 'const senderId = sender;', 1)
+"
+"sidecar stops taking a baseline (a restart replays the whole backlog)|src/lib/sidecar.js|
+s = s.replace('      if (bootstrapping) continue;', '      // baseline removed', 1)
+"
+"sidecar stops checking whether the window is busy|src/lib/sidecar.js|
+s = s.replace('if (core.isBusy(screen, pattern)) {', 'if (false) {', 1)
+"
+"an expired direct message is no longer reported back|src/lib/sidecar.js|
+i = s.index('for (const item of expired) {')
+j = s.index('this._saveState();', i)
+seg = s[i:j]
+seg2 = seg.replace(\"if (item.kind === 'dm' && item.dmId) this._ack(item.dmId, item.agent, 'expired');\", '')
+assert seg != seg2
+s = s[:i] + seg2 + s[j:]
+"
+"two windows claiming one identity is silently guessed|src/lib/sidecar-core.js|
+s = s.replace('if (claimed.length > 1) {', 'if (false) {', 1)
+s = s.replace('const claimed = windows.filter((w) => w.identity === identityName);', 'const claimed = windows.filter((w) => w.identity === identityName).slice(0, 1);', 1)
+"
 "mention prefix collisions no longer refused at startup|src/config.js|
 i = s.index('  const all = [...triggers.keys()];')
 j = s.index('  const mergers =', i)
@@ -214,11 +235,11 @@ fi
 
 export WORK="$(mktemp -d)"   # exported: the mutation snippets read it
 trap 'rm -rf "$WORK"' EXIT
-cp -R src test scripts package.json "$WORK"/ 2>/dev/null   # scripts/ too: a test requires from it
+cp -R src test scripts adapters package.json "$WORK"/ 2>/dev/null   # scripts/ and adapters/: tests require from both
 [ -f .npmrc ] && cp .npmrc "$WORK"/
 ln -s "$ROOT/node_modules" "$WORK/node_modules"
 
-restore() { cp -R "$ROOT/src" "$WORK"/; }
+restore() { cp -R "$ROOT/src" "$ROOT/adapters" "$WORK"/; }
 
 echo "baseline (must be fail=0 cancelled=0, and must finish):"
 BASE="$(run_suite)"

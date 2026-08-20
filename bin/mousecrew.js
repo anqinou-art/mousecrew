@@ -94,6 +94,7 @@ const USAGE = `mousecrew — drive the work board
   say [--as name] [--no-redispatch] "text"    post to the group
   dm --to <agent> "text"                      message one agent
   reply --as <agent> "text"                   answer a direct message
+  identity <agent> [--window ref]              claim this window for a crew member
   status                                      every agent's state
 
 Config: MOUSECREW_URL / MOUSECREW_TOKEN, or ./config.json + its tokenFile.`;
@@ -235,6 +236,45 @@ async function main() {
       if (!who) die('need --as <agent> (or set MOUSECREW_ME)');
       await api('POST', `/api/dm/${who}/post`, { content: f._.join(' ') });
       console.log('replied');
+      break;
+    }
+
+    case 'identity': {
+      // Claim this window for a crew member. Run it inside the window itself.
+      //
+      // Identity moves rather than duplicates: any other window claiming the same name is
+      // released first. Two windows answering to one name is not a tie, it is a message
+      // typed into whichever one the resolver happened to pick — and after a session
+      // restore, that is often the dead one.
+      const who = f._[0];
+      if (!who) die('need <agent-id>  (run this inside the window you want to claim)');
+      const { createAdapter } = require('../adapters/terminal');
+      const { load } = require('../src/config');
+      const { agents } = load();
+      const cfg = agents.find((a) => a.id === who || a.displayName === who);
+      if (!cfg) die(`"${who}" is not on the roster`);
+      if (cfg.transport !== 'terminal') die(`"${who}" is not a terminal agent — nothing to claim`);
+
+      const adapter = createAdapter(f.adapter || cfg.terminal.adapter);
+      const target = cfg.terminal.target || cfg.displayName;
+      const ref = f.window || process.env.MOUSECREW_WINDOW || process.env.TMUX_PANE;
+      if (!ref) {
+        die('cannot tell which window this is.\n' +
+            'Inside tmux, $TMUX_PANE is set automatically; otherwise pass --window <ref>.\n' +
+            `Windows I can see: ${(await adapter.listWindows()).map((w) => w.ref).join(', ') || '(none)'}`);
+      }
+
+      for (const w of await adapter.listWindows()) {
+        if (w.identity === target && w.ref !== ref) {
+          await adapter.clearIdentity(w.ref);
+          console.log(`released ${target} from ${w.ref}`);
+        }
+      }
+      await adapter.setIdentity(ref, target);
+      // Read it back. "The command exited 0" is a claim; the listing is the fact.
+      const now = (await adapter.listWindows()).find((w) => w.ref === ref);
+      if (!now || now.identity !== target) die(`set it, but reading back gave ${now ? now.identity : '(window gone)'} — not claimed`);
+      console.log(`${ref} is now ${target}`);
       break;
     }
 
