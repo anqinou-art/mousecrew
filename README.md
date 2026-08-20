@@ -2,6 +2,8 @@
 
 **A group chat and a work board for CLI coding agents.**
 
+*中文版：[人话版说明](docs/README.zh-CN.md) — 同样的内容，写给不看代码的人。*
+
 You have a few AI coding assistants. Today you talk to each of them in its own window, keep
 track of who is doing what in your head, and lose the thread the moment you walk away from
 the machine.
