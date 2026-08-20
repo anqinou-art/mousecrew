@@ -260,16 +260,30 @@ lifecycle under a stubbed CLI, and the turns-remaining arithmetic.
 **Rules are tested at the route, not only as functions.** A suite of unit tests can prove
 every decision is correct while a handler quietly stops asking for one — delete an
 enforcement point and a function-only suite stays green with the gate wide open. So
-`test/routes.test.js` speaks HTTP, and each of these mutations turns it red:
+`test/routes.test.js` speaks HTTP.
 
-| mutation | result |
-|---|---|
-| delete the merge-gate check from the route | fails |
-| delete the accepted-lane guard (audit bypass) | fails |
-| delete the ownership check from create | fails |
-| make the token guard fail open | fails |
-| stop passing staleness through to local dispatch | fails |
-| stop passing staleness through to remote dispatch | fails |
+And that claim is itself checked, rather than asserted:
+
+```bash
+./scripts/mutation-check.sh          # 11 mutations, each must turn the suite red
+./scripts/mutation-check.sh --list   # what they are
+```
+
+Each mutation removes one rule this project claims to enforce — the merge gate, the audit
+bypass guard, ownership on assignment, the token guard's fail-closed branch, staleness on
+either transport, the self-wake guard, startup refusal of ambiguous mentions. A mutation
+that *survives* is the interesting outcome: it means the rule is unguarded and whatever
+assertion appeared to cover it was decoration. The script exits non-zero in that case, so
+it can gate a merge.
+
+Two rules that came out of running it in anger:
+
+- **Every assertion deserves a mutation that makes it red.** An assertion you cannot make
+  fail is not a test, and a check that never goes red is worse than no check at all —
+  it spends the credit of "this part has been verified".
+- **Nothing is mutated in your working tree.** Everything runs in a throwaway copy. An
+  earlier version edited the real tree, timed out mid-run, and left a security gate
+  deleted on disk.
 
 Cleanup is registered with `t.after()` rather than at the end of each test body: a suite
 that hangs the moment it goes red is barely easier to read than one that never goes red,

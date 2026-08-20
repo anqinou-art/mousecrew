@@ -11,7 +11,8 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test --test-timeout=20000 test/*.test.js",
-    "watch:context": "node scripts/context-watch.js"
+    "watch:context": "node scripts/context-watch.js",
+    "mutation-check": "bash scripts/mutation-check.sh"
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0",
