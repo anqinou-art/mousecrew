@@ -236,6 +236,8 @@ reviewers' backs"* is a claim, and the diff is a fact.
 
 Stated plainly, because you will meet them.
 
+- **One sidecar drives one multiplexer.** A roster mixing adapters needs a second sidecar;
+  the process refuses to start rather than silently ignoring half the crew.
 - **A terminal agent that is always busy misses messages.** Injection only happens when the
   window is idle, and a window doing continuous work is never idle; those messages expire
   after ten minutes. Group history still has them, and undelivered DMs come back with a

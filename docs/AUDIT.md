@@ -33,6 +33,9 @@ at all — it spends credit that was never earned.
 
 ## Knowingly deferred
 
+> The terminal adapter, listed as deferred while the first review ran, has since been built
+> — see [TERMINAL.md](TERMINAL.md). What follows is still deferred.
+
 Things found *after* the review closed, deliberately not fixed in place. Each would have
 been a small change; making it anyway would quietly invalidate the review, and what gets
 invalidated is not the sha — it is the credibility of reviewing at all. The next review
