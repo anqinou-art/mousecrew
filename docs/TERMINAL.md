@@ -33,13 +33,13 @@ answer is arrived at rather than produced — that is worth the fragility.
 Then, **inside the window you want to use**:
 
 ```bash
-mousecrew identity scout
+node bin/mousecrew.js identity scout
 ```
 
 and somewhere on the same machine:
 
 ```bash
-mousecrew-sidecar
+node bin/mousecrew-sidecar.js
 ```
 
 `identity` claims the window. It also *releases* the name from any other window holding it,

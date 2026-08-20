@@ -120,8 +120,16 @@ MOUSECREW_URL=http://server:8787 MOUSECREW_TOKEN=... \
 
 **`terminal`** — an interactive window you are also using.
 Messages are typed into the window as if you had typed them. You can watch the work happen
-and interrupt mid-thought. Needs the terminal adapter — **not in this release**; see
-[Roadmap](#roadmap).
+and interrupt mid-thought. Needs a multiplexer (tmux or cmux) and one sidecar process on
+that machine:
+
+```bash
+node bin/mousecrew.js identity scout   # run inside the window that answers to @scout
+node bin/mousecrew-sidecar.js          # anywhere on the same machine
+```
+
+[docs/TERMINAL.md](docs/TERMINAL.md) covers what a window buys you over headless, how busy
+is decided, why messages expire, and what an adapter is and is not responsible for.
 
 | | local / remote | terminal |
 |---|---|---|
@@ -261,8 +269,6 @@ Stated plainly, because you will meet them.
 
 ## Roadmap
 
-- **Terminal adapter** (tmux first) — collect interactive windows into the crew: identity
-  by window name, back-pressure by reading the screen, a staleness cutoff, delivery receipts.
 - **Actor authentication** — per-agent tokens, so `actor` means something.
 - **Word-boundary mentions** — so a prefix collision becomes a non-issue instead of a
   startup refusal.
