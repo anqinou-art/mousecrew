@@ -1,5 +1,7 @@
 // tmux.js — the reference terminal adapter.
 //
+// tmux: https://github.com/tmux/tmux — not vendored; this adapter shells out to `tmux`.
+//
 // tmux first, deliberately: it is the multiplexer that is actually on other people's
 // machines. Everything else is a second implementation of an interface tmux already
 // proved.

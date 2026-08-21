@@ -1,5 +1,8 @@
 // cmux.js — second implementation, kept honest by the same contract.
 //
+// cmux is an open-source terminal built for coding agents: https://cmux.com
+// Nothing from it is vendored here; this adapter shells out to its `cmux` CLI.
+//
 // It exists mostly to prove the interface is an interface: if tmux were the only adapter,
 // "the abstraction" would just be tmux with extra steps. cmux stores identity in a
 // workspace description rather than a pane option, addresses windows as `workspace:N`

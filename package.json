@@ -22,6 +22,6 @@
   },
   "keywords": [
     "agents", "cli-agents", "orchestration", "work-orders",
-    "state-machine", "tmux", "claude-code", "codex", "multi-agent"
+    "state-machine", "tmux", "cmux", "claude-code", "codex", "multi-agent"
   ]
 }

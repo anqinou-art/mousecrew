@@ -129,12 +129,12 @@ depends on the CLI running inside it, and an adapter would have to know about ev
 anyone might run. And declaring that text arrived — an adapter can only report that it
 issued a command.
 
-**tmux** stores identity in a pane option (`@mousecrew_identity`) rather than the window
+**[tmux](https://github.com/tmux/tmux)** stores identity in a pane option (`@mousecrew_identity`) rather than the window
 name. Window names belong to the person using the terminal; their shell rewrites them, their
 editor sets them back. Writing identity there means fighting the user for a field they own,
 and losing intermittently.
 
-**cmux** stores it in the workspace description. One caveat that does not generalise and
+**[cmux](https://cmux.com)** — an open-source terminal built for coding agents — stores it in the workspace description. One caveat that does not generalise and
 will bite anyone porting this: cmux authorises its control socket by *process ancestry*, not
 by environment. A sidecar started outside cmux connects to the bus, receives everything, and
 then fails to type a single character — while still consuming the messages. It must be

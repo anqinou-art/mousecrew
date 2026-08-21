@@ -120,8 +120,8 @@ MOUSECREW_URL=http://server:8787 MOUSECREW_TOKEN=... \
 
 **`terminal`** — an interactive window you are also using.
 Messages are typed into the window as if you had typed them. You can watch the work happen
-and interrupt mid-thought. Needs a multiplexer (tmux or cmux) and one sidecar process on
-that machine:
+and interrupt mid-thought. Needs a terminal multiplexer — [tmux](https://github.com/tmux/tmux)
+or [cmux](https://cmux.com) — and one sidecar process on that machine:
 
 ```bash
 node bin/mousecrew.js identity scout   # run inside the window that answers to @scout
@@ -270,6 +270,17 @@ Stated plainly, because you will meet them.
   `@name` really will wake that person. Use a placeholder in examples.
 - **Filing an order for yourself pings you about it.** Noise, not breakage; the fix is
   scoped in [docs/AUDIT.md](docs/AUDIT.md).
+
+## Built on
+
+- **[tmux](https://github.com/tmux/tmux)** — the first terminal adapter targets it, and the
+  live test runs against a real tmux server.
+- **[cmux](https://cmux.com)** — the second adapter. Having two implementations is what keeps
+  the adapter interface honest: with one, "the abstraction" is just that multiplexer with
+  extra steps. The bug that shipped in this package (a format string two tmux versions render
+  differently) was caught precisely because the two behave differently.
+
+Neither is vendored here. mousecrew shells out to whichever binary you have.
 
 ## Roadmap
 
