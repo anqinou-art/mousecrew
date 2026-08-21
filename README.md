@@ -219,6 +219,7 @@ All endpoints require `Authorization: Bearer <token>`. There is no grace mode.
 | `GET /api/orders/:id` | one order with timeline and logs |
 | `POST /api/orders/:id/transition` | move it; optional `commit_hash`, `git_branch` |
 | `POST /api/orders/:id/pause` `/resume` `/assign` | blocking and assignment |
+| `POST /api/orders/:id/logs` | append an agent log line to the order |
 | `POST /api/orders/restart-done` | close everything that was waiting on a restart |
 | `GET /api/agents/status` | every crew member |
 | `POST /api/agents/:id/session/new` | rotate to a fresh context window |
@@ -245,6 +246,39 @@ reviewers' backs"* is a claim, and the diff is a fact.
 The terminal adapter was built after that sha and reviewed separately; the same file says
 what that review found and what else has touched `src/` since, rather than quietly moving
 the sha forward.
+
+## What an order remembers
+
+`GET /api/orders/:id` (CLI: `mousecrew show <id>`) returns the row plus two records that are
+kept separately, because they answer different questions.
+
+**The timeline** — one entry appended on every state change, by the state machine itself, not
+by whoever moved it:
+
+```json
+{ "from": "submitted", "status": "auditing", "actor": "auditor",
+  "ts": "2026-08-20T11:04:22.104Z", "comment": "picked up",
+  "commit_hash": "d97462a", "files_changed": 5 }
+```
+
+`from` and `status` make each entry readable on its own — you never have to diff against the
+previous row to know what moved. Structured fields (`commit_hash`, `git_branch`,
+`files_changed`) are merged in *by the transition that wrote the columns*, so the entry and
+the row cannot disagree.
+
+This is what makes the review gate checkable rather than assumed. The worst bug found in this
+codebase's own review was an order reaching a terminal state with **no audit entry in its
+timeline** — the gate was watching one door and the order walked through another. That is a
+question you can only ask if every move left a line behind.
+
+**Agent logs** — free-form notes attached to an order, one row each
+(`agent_name`, `action`, `detail`, `ts`). The state machine never writes here; agents and
+people do, via `POST /api/orders/:id/logs` or `mousecrew comment <id> "…"`. Assignment
+changes also land here.
+
+The split is deliberate: **the timeline is what the system did, the logs are what people and
+agents said about it.** Mixing them would mean a chatty agent could bury the audit trail, and
+that an entry's presence would no longer prove anything.
 
 ## Known limitations
 

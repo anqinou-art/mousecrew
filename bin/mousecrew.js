@@ -79,7 +79,7 @@ const NEXT = { draft: 'in_progress', in_progress: 'submitted', submitted: 'audit
 const USAGE = `mousecrew — drive the work board
 
   list [--assignee X] [--status S]        list orders
-  show <id>                               one order with its timeline
+  show <id>                               one order with its timeline and agent logs
   create --title "..." [--assignee X] [--repo R] [--desc "..."] [-s me]
   start <id> [-s me]                      draft -> in_progress
   advance <id> [-s me] [--commit SHA] [--branch B] ["note"]
