@@ -43,6 +43,7 @@ crew member lives. That separation is the whole design.
 | **Lifecycle you don't babysit** | Lazy start, queueing, idle shutdown, session resume, crash recovery, hang detection. |
 | **Context watch** | Warns an agent when its window is nearly full — measured in *turns remaining*, not percent. |
 | **Direct messages** | Talk to one agent privately, with a visible receipt when a message could not be delivered. |
+| **Threads for what the board misses** | The half-finished thing, the idea from last night. Five states, an append-only log, and one `next` field holding the handle you left behind. |
 
 ## What it does not do
 
@@ -221,12 +222,67 @@ All endpoints require `Authorization: Bearer <token>`. There is no grace mode.
 | `POST /api/orders/:id/pause` `/resume` `/assign` | blocking and assignment |
 | `POST /api/orders/:id/logs` | append an agent log line to the order |
 | `POST /api/orders/restart-done` | close everything that was waiting on a restart |
+| `GET/POST /api/threads` | list / open a thread |
+| `GET /api/threads/:name` | one thread with its plan and log |
+| `PATCH /api/threads/:name` | set one field — `plan` and `snapshot` are refused here by design |
+| `POST /api/threads/:name/log` | append a line; must declare one intent |
+| `POST /api/threads/:name/plan` `/plan/:n/check` `/uncheck` | rewrite the plan, tick, un-tick |
+| `POST /api/threads/:name/finish` | the only road to `done`; requires a snapshot |
+| `POST /api/threads/:name/archive` | soft delete; needs a reason if there is no snapshot |
 | `GET /api/agents/status` | every crew member |
 | `POST /api/agents/:id/session/new` | rotate to a fresh context window |
 | `POST /api/agents/presence` | terminal agents report themselves |
 | `POST /api/agent/:id/chat` | direct message to one agent |
 | `GET /api/dm/events`, `/api/dm/pending`, `POST /api/dm/:id/post`, `/ack` | the DM lane |
 | `WS /ws/bridge?token=` | remote workers |
+
+---
+
+## Threads
+
+An order is work that goes through the board. A thread is work that does not — the idea
+from last night, the thing you got halfway through, the one you meant to come back to.
+Those are the ones that get lost, because nothing was ever opened for them.
+
+```
+mousecrew thread new caching --owner backend --goal "cut cold-start latency"
+mousecrew thread plan caching "write the schema
+write the routes
+add tests"
+mousecrew thread log caching --who backend --what "schema is in, not deployed" --check 1
+mousecrew thread set caching next "wire the router into server.js"
+
+mousecrew thread list
+  doing    backend    1/3    caching
+                             ↳ wire the router into server.js
+```
+
+That last line is the whole point. An agent forgets between windows; a person forgets over
+a weekend. `next` is written when the work is put **down**, not when it is picked up.
+
+Five gates, and each one exists because the shape it prevents is one you cannot see:
+
+- **`set` cannot write `plan` or `snapshot`.** Both have their own endpoints. Through a
+  generic field-setter, "replace the plan" and "record progress on it" become one call.
+- **A log line declares one intent** — ticked item N, plan changed, or progress with the
+  plan unchanged. The server does not need to know; the writer does. An agent that never
+  has to choose writes *"continuing work on this"* forever.
+- **The log cannot be rewritten or deleted**, by anyone, including whoever wrote it five
+  seconds ago having realised it was wrong. Corrections go on the next line. This is a
+  trigger in the schema, not a check in a handler — a rule in one handler is a rule until
+  somebody writes a second handler.
+- **The only road to `done` is `finish`, which needs a snapshot.** Otherwise *"mark it
+  done, I'll write the snapshot after"* becomes a path, and after is a place nobody goes.
+- **Archive is a soft delete**, and archiving without a snapshot needs a stated reason.
+  Not refused outright: a thread can be legitimately abandoned or folded into another one,
+  and blocking that only teaches people to write a fake snapshot to get through the door.
+
+Ticking is reversible; the log is not. The plan is where you are now, the log is what
+happened. Conflating those is what makes plans drift optimistic.
+
+The design write-up, including the version that needs no server at all — a folder, a
+two-line header, and one rule about writing down where you left off — is in
+[docs/THREADS.zh-CN.md](docs/THREADS.zh-CN.md).
 
 ---
 
