@@ -8,6 +8,19 @@
 // Every rule below was paid for. They are stated here as small pure functions rather than
 // as `if` blocks inside handlers, because a rule that lives in one handler is a rule until
 // somebody writes a second handler.
+//
+// ⚠️ These are enforced at the route layer, and that is not the same strength as the
+// constraints in db.js. Know which is which before relying on one:
+//
+//   In the schema, nobody can get past   append-only log (triggers), the five states,
+//                                        name length, non-empty owner, plan item text
+//   Here only, store code can bypass     prev has no cycle, an archived thread is closed
+//
+// The second group is here because SQLite cannot express it — a cycle check is a walk, and
+// CHECK constraints do not recurse. So the route tests are what keep this group honest: a
+// handler that stops calling one of these goes red there and nowhere else. Anything reaching
+// for `store.thread.*` directly is outside all of it, which is fine while the store has one
+// caller and is a thing to remember on the day it has two.
 
 const STATES = ['idea', 'todo', 'doing', 'blocked', 'done'];
 
