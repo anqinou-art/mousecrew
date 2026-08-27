@@ -97,6 +97,17 @@ const USAGE = `mousecrew — drive the work board
   identity <agent> [--window ref]              claim this window for a crew member
   status                                      every agent's state
 
+Threads — work you can put down and pick back up (see docs/THREADS.zh-CN.md):
+  thread list [--owner who] [--all]
+  thread show <name>
+  thread new <name> --owner who [--goal "..."] [--prev <name>]
+  thread set <name> <field> "value"       owner|status|goal|next|blocked_by|needs_human|prev
+  thread plan <name> "one per line"       rewrite the plan; ticks follow the text
+  thread check <name> <n> / uncheck <name> <n>          n counts from 1
+  thread log <name> --who X --what "..." (--check N | --plan "..." | --no-plan-change)
+  thread finish <name> --snapshot "..."   the only road to done
+  thread archive <name> [--why "..."] [--undo]          soft delete; history stays
+
 Config: MOUSECREW_URL / MOUSECREW_TOKEN, or ./config.json + its tokenFile.`;
 
 async function main() {
@@ -275,6 +286,107 @@ async function main() {
       const now = (await adapter.listWindows()).find((w) => w.ref === ref);
       if (!now || now.identity !== target) die(`set it, but reading back gave ${now ? now.identity : '(window gone)'} — not claimed`);
       console.log(`${ref} is now ${target}`);
+      break;
+    }
+
+    // Threads. One verb per kind of change, mirroring the API — the CLI does not get a
+    // shortcut the API refuses, because then the gate would only apply to whoever used curl.
+    case 'thread': {
+      const [sub, name, ...more] = f._;
+      const t = (route, body, method = 'POST') => api(method, `/api/threads${route}`, body);
+      const need = (v, what) => { if (!v) die(`need ${what}`); return v; };
+
+      switch (sub) {
+        case undefined:
+        case 'list': {
+          const q = [];
+          if (f.owner) q.push(`owner=${encodeURIComponent(f.owner)}`);
+          if (f.all) q.push('archived=all');
+          const rows = await api('GET', '/api/threads' + (q.length ? '?' + q.join('&') : ''));
+          for (const th of rows) {
+            const plan = th.plan.length ? `${th.plan.filter((p) => p.done).length}/${th.plan.length}` : '-';
+            const mark = th.archived ? ' (archived)' : '';
+            console.log(`  ${String(th.status).padEnd(8)} ${String(th.owner).padEnd(10)} ${String(plan).padEnd(6)} ${th.name}${mark}`);
+            // next is the handle. Showing it in the list is the whole point of the list:
+            // you should be able to pick a thread back up without opening it first.
+            if (th.next) console.log(`  ${' '.repeat(26)}↳ ${th.next}`);
+          }
+          console.log(`  (${rows.length} threads)`);
+          break;
+        }
+
+        case 'show':
+          console.log(JSON.stringify(await api('GET', `/api/threads/${encodeURIComponent(need(name, '<name>'))}`), null, 2));
+          break;
+
+        case 'new': {
+          need(name, '<name>'); need(f.owner, '--owner');
+          const r = await t('', { name, owner: f.owner, goal: f.goal || '', next: f.next || '', prev: f.prev || null });
+          console.log(`${r.data.name} (idea / ${r.data.owner})`);
+          break;
+        }
+
+        case 'set': {
+          need(name, '<name>');
+          const field = need(more[0], '<field>');
+          const value = more.slice(1).join(' ');
+          const r = await t(`/${encodeURIComponent(name)}`, { field, value }, 'PATCH');
+          console.log(`${name}: ${field} = ${r.data[field] === null ? '(none)' : r.data[field]}`);
+          break;
+        }
+
+        case 'plan': {
+          need(name, '<name>');
+          const text = need(more.join(' ') || f.text, '<text>');
+          const r = await t(`/${encodeURIComponent(name)}/plan`, { items: String(text).split('\n') });
+          for (const p of r.data.plan) console.log(`  ${p.done ? '[x]' : '[ ]'} ${p.idx}. ${p.text}`);
+          break;
+        }
+
+        case 'check':
+        case 'uncheck': {
+          need(name, '<name>');
+          const n = need(more[0], '<n>');
+          const r = await t(`/${encodeURIComponent(name)}/plan/${n}/${sub}`, {});
+          const item = r.data.plan.find((p) => String(p.idx) === String(n));
+          console.log(`  ${item.done ? '[x]' : '[ ]'} ${item.idx}. ${item.text}`);
+          break;
+        }
+
+        case 'log': {
+          need(name, '<name>');
+          need(f.who, '--who'); need(f.what, '--what');
+          const body = { who: f.who, what: f.what };
+          // Exactly one of the three, and the CLI does not pick for you — the choice is
+          // the point. Sending none gets a 400 that says so.
+          if (f.check !== undefined) body.check = Number(f.check);
+          if (f.plan !== undefined) body.plan = f.plan;
+          if (f['no-plan-change'] !== undefined) body.no_plan_change = true;
+          const r = await t(`/${encodeURIComponent(name)}/log`, body);
+          console.log(`${name}: logged (${r.data.log.length} lines)`);
+          break;
+        }
+
+        case 'finish': {
+          need(name, '<name>');
+          const r = await t(`/${encodeURIComponent(name)}/finish`, { snapshot: need(f.snapshot, '--snapshot') });
+          console.log(`${name} -> done`);
+          // Reported, not enforced: finishing with items open is legitimate, and refusing
+          // it would only produce ticks added to get past the door.
+          if (r.open_plan_items) console.log(`  (${r.open_plan_items} plan item(s) still unticked)`);
+          break;
+        }
+
+        case 'archive': {
+          need(name, '<name>');
+          const r = await t(`/${encodeURIComponent(name)}/archive`, f.undo ? { undo: true } : { why: f.why });
+          console.log(`${name} ${r.data.archived ? 'archived' : 'restored'}`);
+          break;
+        }
+
+        default:
+          die(`unknown: thread ${sub}`);
+      }
       break;
     }
 

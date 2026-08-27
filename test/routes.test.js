@@ -298,3 +298,150 @@ test('presence only accepts crew members that are actually terminal agents', asy
   assert.equal(s.backend.state, 'busy');
   assert.ok(!('not-on-the-roster' in s));
 });
+
+// ---------------------------------------------------------------------------
+// Threads.
+//
+// The gates are unit-tested in thread-rules.test.js. These prove each one is actually
+// consulted on the way through — delete a check from a handler and one of these goes red
+// while every unit test stays green.
+
+async function newThread(call, name, owner = 'shu') {
+  const r = await call('POST', '/api/threads', { name, owner });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  return r.body.data;
+}
+
+test('threads: a new thread starts as an idea, with no way to file it as already running', async (t) => {
+  const { call } = await boot(t);
+  const made = await newThread(call, 'caching');
+  assert.equal(made.status, 'idea');
+  assert.deepEqual(made.plan, []);
+  assert.deepEqual(made.log, []);
+  // Naming it twice is a conflict, not a silent overwrite of someone else's thread.
+  assert.equal((await call('POST', '/api/threads', { name: 'caching', owner: 'other' })).status, 409);
+});
+
+test('threads: set refuses plan and snapshot, over HTTP', async (t) => {
+  const { call } = await boot(t);
+  await newThread(call, 'caching');
+  const plan = await call('PATCH', '/api/threads/caching', { field: 'plan', value: 'sneaking it in' });
+  assert.equal(plan.status, 400);
+  assert.equal(plan.body.error, 'plan_not_settable');
+
+  const snap = await call('PATCH', '/api/threads/caching', { field: 'snapshot', value: 'done I guess' });
+  assert.equal(snap.status, 400);
+  assert.equal(snap.body.error, 'snapshot_not_settable');
+});
+
+test('threads: the only road to done is finish, and finish needs a snapshot', async (t) => {
+  const { call } = await boot(t);
+  await newThread(call, 'caching');
+
+  const viaSet = await call('PATCH', '/api/threads/caching', { field: 'status', value: 'done' });
+  assert.equal(viaSet.status, 400);
+  assert.equal(viaSet.body.error, 'use_finish');
+
+  const bare = await call('POST', '/api/threads/caching/finish', {});
+  assert.equal(bare.status, 400);
+  assert.equal(bare.body.error, 'snapshot_required');
+
+  const ok = await call('POST', '/api/threads/caching/finish', { snapshot: 'shipped; retry path untested' });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.data.status, 'done');
+  assert.equal(ok.body.data.snapshot, 'shipped; retry path untested');
+});
+
+test('threads: a log line must declare one intent — none and two are both refused', async (t) => {
+  const { call } = await boot(t);
+  await newThread(call, 'caching');
+
+  const none = await call('POST', '/api/threads/caching/log', { who: 'shu', what: 'poked at it' });
+  assert.equal(none.status, 400);
+  assert.equal(none.body.error, 'log_intent_required');
+
+  const two = await call('POST', '/api/threads/caching/log', { who: 'shu', what: 'x', check: 1, no_plan_change: true });
+  assert.equal(two.status, 400);
+  assert.equal(two.body.error, 'log_intent_ambiguous');
+
+  const one = await call('POST', '/api/threads/caching/log', { who: 'shu', what: 'read the code, no changes yet', no_plan_change: true });
+  assert.equal(one.status, 200);
+  assert.equal(one.body.data.log.length, 1);
+});
+
+test('threads: nobody can rewrite or delete a log line, including whoever wrote it', async (t) => {
+  const { call, ctx } = await boot(t);
+  await newThread(call, 'caching');
+  await call('POST', '/api/threads/caching/log', { who: 'shu', what: 'wrote it wrong', no_plan_change: true });
+
+  assert.throws(() => ctx.store.db.exec("UPDATE thread_log SET what = 'actually right'"), /append-only/);
+  assert.throws(() => ctx.store.db.exec('DELETE FROM thread_log'), /append-only/);
+  // The line is still there, unchanged. A correction goes on the next line.
+  const after = await call('GET', '/api/threads/caching');
+  assert.equal(after.body.log[0].what, 'wrote it wrong');
+});
+
+test('threads: a log line and the plan change it describes land together or not at all', async (t) => {
+  const { call } = await boot(t);
+  await newThread(call, 'caching');
+  await call('POST', '/api/threads/caching/plan', { items: ['schema', 'routes'] });
+
+  // Ticking an item that does not exist must leave no log line behind, or the log would
+  // point at a plan state that never happened.
+  const bad = await call('POST', '/api/threads/caching/log', { who: 'shu', what: 'ticked 9', check: 9 });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.body.error, 'plan_item_not_found');
+  const after = await call('GET', '/api/threads/caching');
+  assert.equal(after.body.log.length, 0, 'a refused plan change must not leave a log line');
+
+  const good = await call('POST', '/api/threads/caching/log', { who: 'shu', what: 'schema is in', check: 1 });
+  assert.equal(good.status, 200);
+  assert.equal(good.body.data.plan[0].done, 1);
+  assert.equal(good.body.data.log.length, 1);
+});
+
+test('threads: a tick can be taken back, because the plan is where we are now', async (t) => {
+  const { call } = await boot(t);
+  await newThread(call, 'caching');
+  await call('POST', '/api/threads/caching/plan', { items: ['schema'] });
+  await call('POST', '/api/threads/caching/plan/1/check');
+  assert.equal((await call('GET', '/api/threads/caching')).body.plan[0].done, 1);
+  await call('POST', '/api/threads/caching/plan/1/uncheck');
+  assert.equal((await call('GET', '/api/threads/caching')).body.plan[0].done, 0);
+});
+
+test('threads: archiving without a snapshot needs a reason; with one it does not', async (t) => {
+  const { call } = await boot(t);
+  await newThread(call, 'abandoned');
+  const bare = await call('POST', '/api/threads/abandoned/archive', {});
+  assert.equal(bare.status, 400);
+  assert.equal(bare.body.error, 'why_required');
+
+  const withWhy = await call('POST', '/api/threads/abandoned/archive', { why: 'folded into caching' });
+  assert.equal(withWhy.status, 200);
+  assert.equal(withWhy.body.data.archived, true);
+
+  // Soft delete: it is out of the default list but its history is still readable.
+  assert.equal((await call('GET', '/api/threads')).body.find((x) => x.name === 'abandoned'), undefined);
+  assert.equal((await call('GET', '/api/threads?archived=all')).body.find((x) => x.name === 'abandoned').name, 'abandoned');
+  assert.equal((await call('GET', '/api/threads/abandoned')).status, 200);
+
+  const undone = await call('POST', '/api/threads/abandoned/archive', { undo: true });
+  assert.equal(undone.body.data.archived, false);
+});
+
+test('threads: prev is one-way and must point at something real', async (t) => {
+  const { call } = await boot(t);
+  await newThread(call, 'v1');
+  assert.equal((await call('POST', '/api/threads', { name: 'v2', owner: 'shu', prev: 'ghost' })).status, 400);
+  const v2 = await newThread(call, 'v2');
+  assert.equal(v2.prev, null);
+  assert.equal((await call('PATCH', '/api/threads/v2', { field: 'prev', value: 'v1' })).body.data.prev, 'v1');
+  assert.equal((await call('PATCH', '/api/threads/v2', { field: 'prev', value: 'v2' })).status, 400);
+});
+
+test('threads: the API is behind the token like everything else', async (t) => {
+  const { call } = await boot(t);
+  assert.equal((await call('GET', '/api/threads', undefined, { token: null })).status, 401);
+  assert.equal((await call('POST', '/api/threads', { name: 'x', owner: 'y' }, { token: null })).status, 401);
+});

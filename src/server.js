@@ -18,6 +18,7 @@ const { createRequireToken, readTokenFile, tokenMatches } = require('./lib/requi
 const { createGroupRouter } = require('./routes/group');
 const { createOrdersRouter } = require('./routes/orders');
 const { createAgentsRouter } = require('./routes/agents');
+const { createThreadsRouter } = require('./routes/threads');
 const { createRemoteBridge } = require('./ws/remote-bridge');
 
 function build({ config, agents }) {
@@ -49,6 +50,7 @@ function build({ config, agents }) {
   const orders = createOrdersRouter({ store, identity, hub, workspace, notifier, requireToken, config });
   app.use(orders.router);
   app.use(createAgentsRouter({ manager, identity, store, requireToken, config }));
+  app.use(createThreadsRouter({ store, requireToken }));
 
   return { app, store, hub, manager, dispatcher, nudger, identity, workspace, notifier, config, agents };
 }
