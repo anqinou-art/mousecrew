@@ -445,3 +445,45 @@ test('threads: the API is behind the token like everything else', async (t) => {
   assert.equal((await call('GET', '/api/threads', undefined, { token: null })).status, 401);
   assert.equal((await call('POST', '/api/threads', { name: 'x', owner: 'y' }, { token: null })).status, 401);
 });
+
+test('threads: writes to an archived thread are refused, not silently accepted', async (t) => {
+  const { call } = await boot(t);
+  await newThread(call, 'shelved');
+  await call('POST', '/api/threads/shelved/archive', { why: 'not now' });
+
+  // Archived threads are out of the default listing. A write that succeeds here lands
+  // somewhere nobody is looking — which is the whole reason this is refused rather than
+  // allowed-but-hidden.
+  for (const [method, route, body] of [
+    ['PATCH', '/api/threads/shelved', { field: 'next', value: 'x' }],
+    ['POST', '/api/threads/shelved/log', { who: 'shu', what: 'x', no_plan_change: true }],
+    ['POST', '/api/threads/shelved/plan', { items: ['x'] }],
+    ['POST', '/api/threads/shelved/finish', { snapshot: 'x' }],
+  ]) {
+    const r = await call(method, route, body);
+    assert.equal(r.status, 400, `${method} ${route} should refuse`);
+    assert.equal(r.body.error, 'thread_archived');
+  }
+
+  // Reading still works, and un-archiving reopens it for writing.
+  assert.equal((await call('GET', '/api/threads/shelved')).status, 200);
+  await call('POST', '/api/threads/shelved/archive', { undo: true });
+  assert.equal((await call('PATCH', '/api/threads/shelved', { field: 'next', value: 'x' })).status, 200);
+});
+
+test('threads: prev cannot be closed into a cycle, over HTTP', async (t) => {
+  const { call } = await boot(t);
+  await newThread(call, 'v1');
+  await call('POST', '/api/threads', { name: 'v2', owner: 'shu', prev: 'v1' });
+  // v1 → v2 would close v1→v2→v1. Only checking `value === name` lets this through.
+  const cycle = await call('PATCH', '/api/threads/v1', { field: 'prev', value: 'v2' });
+  assert.equal(cycle.status, 400);
+  assert.equal(cycle.body.error, 'prev_cycle');
+});
+
+test('threads: an over-long name is refused at the door', async (t) => {
+  const { call } = await boot(t);
+  const r = await call('POST', '/api/threads', { name: 'z'.repeat(500), owner: 'shu' });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.error, 'name_too_long');
+});

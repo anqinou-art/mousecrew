@@ -137,3 +137,51 @@ test('blank lines are dropped and numbering closes up behind them', () => {
     [{ idx: 1, text: 'one', done: 0 }, { idx: 2, text: 'two', done: 0 }],
   );
 });
+
+// --- found in audit ---
+
+test('the state list has exactly one home: the schema is generated from it', () => {
+  // Two copies only disagree once somebody adds a state, and the disagreement shows up as
+  // a write failing for a value the code believes is legal.
+  const db = require('fs').readFileSync(require('path').join(__dirname, '../src/db.js'), 'utf8');
+  assert.match(db, /CHECK \(status IN \(\$\{STATES/, 'db.js must build the CHECK from STATES, not repeat it');
+  assert.doesNotMatch(db, /CHECK \(status IN \('idea'/, 'a literal state list in db.js is a second source of truth');
+});
+
+test('prev cycles are refused, not just self-reference', () => {
+  const { checkPrevChain } = require('../src/lib/thread-rules');
+  const graph = { A: { prev: 'B' }, B: { prev: null }, C: { prev: 'A' } };
+  const at = (n) => graph[n];
+
+  assert.equal(checkPrevChain('A', 'A', at).error, 'prev_self_reference');
+  // A→B→A: the shortest cycle that is not self-reference, and the one a route that only
+  // checks `value === name` lets straight through.
+  assert.equal(checkPrevChain('B', 'A', at).error, 'prev_cycle');
+  // Longer: C→A→B, then pointing B at C closes it.
+  assert.equal(checkPrevChain('B', 'C', at).error, 'prev_cycle');
+  assert.equal(checkPrevChain('D', 'C', at).ok, true);          // no cycle, terminates
+  assert.equal(checkPrevChain('D', 'ghost', at).error, 'prev_not_found');
+  assert.equal(checkPrevChain('D', null, at).ok, true);
+});
+
+test('names are bounded and cannot contain control characters', () => {
+  const { checkName, NAME_MAX } = require('../src/lib/thread-rules');
+  assert.equal(checkName('caching').ok, true);
+  assert.equal(checkName('').ok, false);
+  assert.equal(checkName('   ').ok, false);
+  assert.equal(checkName('z'.repeat(NAME_MAX)).ok, true);
+  assert.equal(checkName('z'.repeat(NAME_MAX + 1)).error, 'name_too_long');
+  // A newline breaks every one-line-per-thread listing there is.
+  assert.equal(checkName('two\nlines').error, 'name_has_control_characters');
+  assert.equal(checkName('tab\there').error, 'name_has_control_characters');
+  // Path-looking names are fine: the name is only ever a database key, never a file path.
+  assert.equal(checkName('../not-a-path').ok, true);
+});
+
+test('an archived thread is closed, not just hidden', () => {
+  const { checkWritable } = require('../src/lib/thread-rules');
+  assert.equal(checkWritable({ archived_at: null }).ok, true);
+  const refused = checkWritable({ archived_at: '2026-08-27 12:00:00' });
+  assert.equal(refused.error, 'thread_archived');
+  assert.match(refused.detail, /undo/);       // says how to get out of the refusal
+});

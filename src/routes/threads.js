@@ -7,7 +7,7 @@
 
 const express = require('express');
 const {
-  checkSet, checkLogIntent, checkFinish, checkArchive, mergePlan,
+  checkSet, checkLogIntent, checkFinish, checkArchive, checkName, checkPrevChain, checkWritable, mergePlan,
 } = require('../lib/thread-rules');
 
 function createThreadsRouter({ store, requireToken }) {
@@ -31,6 +31,20 @@ function createThreadsRouter({ store, requireToken }) {
       res.status(404).json({ error: 'thread_not_found' });
       return null;
     }
+    return row;
+  }
+
+  /**
+   * Load for a write. An archived thread is closed, not hidden — and since it is out of
+   * the default listing, a write to it lands where nobody is looking. Every write path
+   * goes through this rather than through load(), so adding a new endpoint that forgets
+   * the check requires deliberately reaching for the other function.
+   */
+  function loadWritable(req, res) {
+    const row = load(req, res);
+    if (!row) return null;
+    const verdict = checkWritable(row);
+    if (!verdict.ok) { refuse(res, verdict); return null; }
     return row;
   }
 
@@ -58,12 +72,15 @@ function createThreadsRouter({ store, requireToken }) {
 
   router.post('/api/threads', (req, res) => {
     const { name, owner, goal, next, prev } = req.body || {};
-    if (!name || !String(name).trim()) return res.status(400).json({ error: 'name_required' });
+    const named = checkName(name);
+    if (!named.ok) return refuse(res, named);
     if (!owner || !String(owner).trim()) return res.status(400).json({ error: 'owner_required' });
     if (store.thread.get.get(name)) return res.status(409).json({ error: 'thread_exists' });
-    // prev is a one-way index and must point at something real; a dangling pointer here
-    // would be a lie told to whoever follows the chain back in three months.
-    if (prev && !store.thread.get.get(prev)) return res.status(400).json({ error: 'prev_not_found' });
+    // prev is a one-way index: it must point at something real, and following it must
+    // terminate. A dangling pointer is a lie told to whoever walks the chain in three
+    // months; a cycle is a hang in whatever does the walking.
+    const chained = checkPrevChain(String(name), prev || null, (n) => store.thread.get.get(n));
+    if (!chained.ok) return refuse(res, chained);
     // Every thread starts as an idea. There is no way to file something as already
     // in progress, because "I'll open it properly later" is how they get lost.
     store.thread.create.run(String(name), String(owner), 'idea', String(goal || ''), String(next || ''), prev || null);
@@ -83,14 +100,14 @@ function createThreadsRouter({ store, requireToken }) {
   };
 
   router.patch('/api/threads/:name', (req, res) => {
-    const row = load(req, res);
+    const row = loadWritable(req, res);
     if (!row) return undefined;
     const { field, value } = req.body || {};
     const verdict = checkSet(field, value);
     if (!verdict.ok) return refuse(res, verdict);
     if (field === 'prev') {
-      if (value && !store.thread.get.get(value)) return res.status(400).json({ error: 'prev_not_found' });
-      if (value === row.name) return res.status(400).json({ error: 'prev_self_reference' });
+      const chained = checkPrevChain(row.name, value || null, (n) => store.thread.get.get(n));
+      if (!chained.ok) return refuse(res, chained);
     }
     SETTERS[field](row.name, value);
     return res.json({ ok: true, data: hydrate(store.thread.get.get(row.name)) });
@@ -99,7 +116,7 @@ function createThreadsRouter({ store, requireToken }) {
   // ---------- plan ----------
 
   router.post('/api/threads/:name/plan', (req, res) => {
-    const row = load(req, res);
+    const row = loadWritable(req, res);
     if (!row) return undefined;
     const items = Array.isArray(req.body?.items) ? req.body.items : null;
     if (!items) return res.status(400).json({ error: 'items_required', detail: 'items: [string, ...]' });
@@ -120,7 +137,7 @@ function createThreadsRouter({ store, requireToken }) {
   // as ticking or the plan drifts optimistic. The log is the part that cannot be revised.
   for (const [verb, done] of [['check', 1], ['uncheck', 0]]) {
     router.post(`/api/threads/:name/plan/:idx/${verb}`, (req, res) => {
-      const row = load(req, res);
+      const row = loadWritable(req, res);
       if (!row) return undefined;
       const idx = Number(req.params.idx);
       if (!Number.isInteger(idx) || idx < 1) return res.status(400).json({ error: 'bad_index', detail: 'plan items are numbered from 1' });
@@ -134,7 +151,7 @@ function createThreadsRouter({ store, requireToken }) {
   // ---------- log (gate 2) ----------
 
   router.post('/api/threads/:name/log', (req, res) => {
-    const row = load(req, res);
+    const row = loadWritable(req, res);
     if (!row) return undefined;
     const body = req.body || {};
     const { who, what } = body;
@@ -181,7 +198,7 @@ function createThreadsRouter({ store, requireToken }) {
   // ---------- finish (gate 4) ----------
 
   router.post('/api/threads/:name/finish', (req, res) => {
-    const row = load(req, res);
+    const row = loadWritable(req, res);
     if (!row) return undefined;
     const snapshot = req.body?.snapshot;
     const verdict = checkFinish(snapshot);

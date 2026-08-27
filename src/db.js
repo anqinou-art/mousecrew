@@ -2,6 +2,10 @@
 // added columns go through idempotent ALTERs so an existing database upgrades in place.
 
 const Database = require('better-sqlite3');
+// The state list lives in one place. Repeating it in the CHECK constraint would mean a
+// second copy that only disagrees with the first once somebody adds a state — and the
+// disagreement would surface as a write failing for a value the code believes is legal.
+const { STATES, NAME_MAX } = require('./lib/thread-rules');
 const fs = require('fs');
 const path = require('path');
 
@@ -68,12 +72,14 @@ function open(dbPath) {
     --
     -- Every constraint below is load-bearing. See lib/thread-rules.js for why each exists.
     CREATE TABLE IF NOT EXISTS threads (
-      name        TEXT PRIMARY KEY,
+      -- Bounded because the name goes in a URL and in every list line. Unbounded, one
+      -- thread with a pasted paragraph for a name makes the whole list unreadable.
+      name        TEXT PRIMARY KEY CHECK (length(name) BETWEEN 1 AND ${NAME_MAX}),
       owner       TEXT NOT NULL CHECK (length(trim(owner)) > 0),
       -- Five states, enforced by the database. Free-text status drifts into dozens of
       -- phrasings and then nobody can filter on it. An enum is cruel and also a mercy.
       status      TEXT NOT NULL DEFAULT 'idea'
-                  CHECK (status IN ('idea', 'todo', 'doing', 'blocked', 'done')),
+                  CHECK (status IN (${STATES.map((x) => `'${x}'`).join(', ')})),
       goal        TEXT NOT NULL DEFAULT '',
       -- One next action, concrete enough to start on. This is the handle you leave behind.
       next        TEXT NOT NULL DEFAULT '',

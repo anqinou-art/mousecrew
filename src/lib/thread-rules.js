@@ -11,6 +11,11 @@
 
 const STATES = ['idea', 'todo', 'doing', 'blocked', 'done'];
 
+// A name is an identifier a person says out loud, and it travels in a URL and in every
+// line of `thread list`. The database enforces the same bound, generated from this
+// constant — see db.js.
+const NAME_MAX = 120;
+
 // Gate 1. What `set` may write.
 //
 // `plan` is not here, and neither is `snapshot`. Both have their own endpoints for a
@@ -75,6 +80,47 @@ function checkLogIntent(body) {
   return OK;
 }
 
+/** A name has to survive a URL and a list column. */
+function checkName(name) {
+  const s = String(name == null ? '' : name);
+  if (!s.trim()) return fail('name_required');
+  if (s.length > NAME_MAX) return fail('name_too_long', `at most ${NAME_MAX} characters`);
+  // Newlines would break every line-per-thread listing there is; control characters
+  // would do it invisibly, which is worse.
+  if (/[\u0000-\u001f\u007f]/.test(s)) return fail('name_has_control_characters');
+  return OK;
+}
+
+/**
+ * `prev` is a one-way index: a new thread points at the one it grew out of. Following it
+ * has to terminate, so a cycle is not a strange edge case — it is a hang in whatever walks
+ * the chain. Self-reference is only the shortest cycle; A→B→A is the same bug.
+ */
+function checkPrevChain(name, prev, lookup) {
+  if (!prev) return OK;
+  if (prev === name) return fail('prev_self_reference');
+  const seen = new Set([name]);
+  let at = prev;
+  while (at) {
+    if (seen.has(at)) return fail('prev_cycle', `${[...seen].join(' → ')} → ${at}`);
+    seen.add(at);
+    const row = lookup(at);
+    if (!row) return fail('prev_not_found');
+    at = row.prev;
+  }
+  return OK;
+}
+
+/**
+ * An archived thread is closed, not hidden. Writing to one is almost always a mistake made
+ * from a stale list — and because archived threads are out of the default listing, the
+ * write lands somewhere nobody is looking. Refusing it says so at the moment it happens.
+ */
+function checkWritable(thread) {
+  if (thread.archived_at) return fail('thread_archived', 'un-archive it first: POST /api/threads/:name/archive {"undo":true}');
+  return OK;
+}
+
 /** Gate 4: a snapshot is what makes done mean something. */
 function checkFinish(snapshot) {
   if (typeof snapshot !== 'string' || !snapshot.trim()) {
@@ -112,4 +158,7 @@ function mergePlan(oldItems, newTexts) {
     .map((text, i) => ({ idx: i + 1, text, done: doneByText.has(text) ? 1 : 0 }));
 }
 
-module.exports = { STATES, SETTABLE, LOG_INTENTS, checkSet, checkLogIntent, checkFinish, checkArchive, mergePlan };
+module.exports = {
+  STATES, SETTABLE, LOG_INTENTS, NAME_MAX,
+  checkSet, checkLogIntent, checkFinish, checkArchive, checkName, checkPrevChain, checkWritable, mergePlan,
+};
