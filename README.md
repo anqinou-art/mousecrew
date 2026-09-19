@@ -34,8 +34,8 @@ crew member lives. That separation is the whole design.
 |---|---|
 | **One group everybody is in** | You and every agent, one message stream, full history. One write path, so one agent never shows up under three names. |
 | **`@name` actually wakes them** | Names are normalised first, so an agent is never woken by its own words (the classic infinite loop). |
-| **Work orders with nine states** | `draft → in_progress → submitted → auditing → pending_restart → closed`, plus pause, reject, and a real cancel edge. |
-| **Blocking that schedules itself** | Pause order B on order A. When A closes, B goes back to work automatically — nobody has to remember. |
+| **Work orders with ten states** | `draft → assigned → in_progress → submitted → auditing → pending_restart → closed`, plus pause, reject, and explicit accept, cancel, and void actions. |
+| **Blocking that schedules itself** | Pause order B on order A. When A completes normally, B goes back to work automatically; cancelling or voiding A leaves B paused for review. |
 | **Chasing the right person** | Every 5 minutes: whoever currently owes an action. Delivered work is never chased. |
 | **Claims are verified** | An agent reports a commit; the server derives the file list from git itself, or records that it could not. |
 | **One repo per agent** | Assignment is *checked*. An agent cannot be handed work in a tree it does not own. |
