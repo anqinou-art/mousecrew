@@ -14,7 +14,14 @@ const {
   transition,
 } = require('../lib/order-state-machine');
 const { verifyCommit, makeVerifyBudget } = require('../lib/commit-verify');
-const { makeWakeFreshness } = require('../lib/wake-freshness');
+const { makeWakeFreshness, ownerOf } = require('../lib/wake-freshness');
+
+const CLAIM_TARGETS = {
+  draft: 'in_progress',
+  assigned: 'in_progress',
+  rejected: 'in_progress',
+  submitted: 'auditing',
+};
 
 function createOrdersRouter({ store, identity, hub, workspace, notifier, requireToken, config }) {
   const router = express.Router();
@@ -53,18 +60,40 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     // the queue — by then the order may have moved on without it.
     bus.emit('group:dispatch_mentions', {
       content, sender: 'system',
-      freshness: makeWakeFreshness(store, order.id, { enqueuedStatus: order.status }),
+      freshness: makeWakeFreshness(store, order.id, {
+        enqueuedStatus: order.status,
+        recipient: recipientId,
+        workspace,
+      }),
     });
     bus.emit('group:post', { role: 'user', content, sender: 'system' });
     notifier.send(title, `${order.id} @${mention}: ${order.title}`).catch(() => {});
   }
 
-  function ownerFor(order, status = order.status) {
-    if (status === 'assigned' || status === 'in_progress' || status === 'rejected') return order.assignee;
-    if (status === 'submitted' || status === 'auditing') {
-      return workspace.mergeGate ? workspace.mergeGate.id : null;
+  function claimFor(order, toStatus) {
+    if (CLAIM_TARGETS[order.status] !== toStatus) return null;
+    const role = order.status === 'submitted' ? 'merge gate' : 'assignee';
+    const owner = role === 'merge gate'
+      ? (!workspace.isSelfManaged(order.assignee) && workspace.mergeGate
+        ? workspace.mergeGate.id
+        : null)
+      : order.assignee;
+    return { owner, role };
+  }
+
+  function checkClaimOwner(order, toStatus, actor) {
+    const claim = claimFor(order, toStatus);
+    if (!claim) return { ok: true };
+    if (!claim.owner) {
+      return { ok: false, error: `${order.id} has no ${claim.role} to accept it` };
     }
-    return null;
+    if (!actor || identity.normalizeAgentId(actor) !== identity.normalizeAgentId(claim.owner)) {
+      return {
+        ok: false,
+        error: `only the ${claim.role} (${claim.owner}) may accept ${order.id}; actor is required`,
+      };
+    }
+    return { ok: true, role: claim.role };
   }
 
   function wakeForTransition(before, after, toStatus, actor) {
@@ -73,7 +102,7 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
       return;
     }
     if (toStatus === 'submitted') {
-      wake(after, ownerFor(after, 'submitted'), `${after.id} is ready for review. Use \`mousecrew accept ${after.id}\` to take it.`, 'review ready', actor);
+      wake(after, ownerOf(after, workspace), `${after.id} is ready for review. Use \`mousecrew accept ${after.id}\` to take it.`, 'review ready', actor);
       return;
     }
     if (toStatus === 'rejected') {
@@ -173,40 +202,22 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     const o = store.order.getById.get(req.params.id);
     if (!o) return res.status(404).json({ error: 'order not found' });
     const { actor } = req.body || {};
-    const who = identity.normalizeAgentId(actor);
-    const edges = {
-      assigned: { to: 'in_progress', owner: o.assignee, role: 'assignee' },
-      rejected: { to: 'in_progress', owner: o.assignee, role: 'assignee' },
-      submitted: {
-        to: 'auditing',
-        owner: !workspace.isSelfManaged(o.assignee) && workspace.mergeGate
-          ? workspace.mergeGate.id
-          : null,
-        role: 'merge gate',
-      },
-    };
-    const edge = edges[o.status];
-    if (!edge) {
+    const toStatus = CLAIM_TARGETS[o.status];
+    if (!toStatus || o.status === 'draft') {
       return res.status(400).json({
         error: `accept is only valid for assigned, submitted, or rejected orders; ${o.id} is ${o.status}`,
       });
     }
-    if (!edge.owner) {
-      return res.status(400).json({ error: `${o.id} has no ${edge.role} to accept it` });
-    }
-    if (!actor || who !== identity.normalizeAgentId(edge.owner)) {
-      return res.status(400).json({
-        error: `only the ${edge.role} (${edge.owner}) may accept ${o.id}; actor is required`,
-      });
-    }
+    const claim = checkClaimOwner(o, toStatus, actor);
+    if (!claim.ok) return res.status(400).json({ error: claim.error });
 
-    const result = transition(store, o.id, edge.to, actor, `${edge.role} accepted`);
+    const result = transition(store, o.id, toStatus, actor, `${claim.role} accepted`);
     if (!result.ok) return res.status(400).json({ error: result.error });
     card({
-      order_id: o.id, title: o.title, from_status: o.status, to_status: edge.to,
-      actor, assignee: result.order.assignee, comment: `${edge.role} accepted`,
+      order_id: o.id, title: o.title, from_status: o.status, to_status: toStatus,
+      actor, assignee: result.order.assignee, comment: `${claim.role} accepted`,
     });
-    res.json({ ok: true, order: result.order, from: o.status, to: edge.to });
+    res.json({ ok: true, order: result.order, from: o.status, to: toStatus });
   });
 
   // ---------- transition ----------
@@ -283,6 +294,9 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
       });
     }
 
+    const claim = checkClaimOwner(o, to_status, actor);
+    if (!claim.ok) return res.status(400).json({ error: claim.error });
+
     let commitMeta;
     if (commit_hash || git_branch) commitMeta = backfill(o, { commit_hash, git_branch });
     const timelineMeta = {
@@ -312,14 +326,14 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     for (const rid of result.autoResumed || []) {
       const ro = store.order.getById.get(rid);
       card({ order_id: rid, title: ro.title, from_status: 'paused', to_status: ro.status, actor: 'system', assignee: ro.assignee, comment: `auto-resume: ${o.id} closed` });
-      wake(ro, ownerFor(ro), `${o.id} closed, so ${rid} (${ro.title}) is unblocked.`, 'unblocked');
+      wake(ro, ownerOf(ro, workspace), `${o.id} closed, so ${rid} (${ro.title}) is unblocked.`, 'unblocked');
     }
     for (const rid of result.blockedSkipped || []) {
       const ro = store.order.getById.get(rid);
       if (!ro) continue;
       const detail = `${o.id} was cancelled instead of completed: ${String(comment).trim()}. Review this dependency, then resume or cancel ${rid}.`;
       store.log.insert.run(rid, 'system', 'comment', detail);
-      wake(ro, ownerFor(ro, resumeTargetOf(ro)), detail, 'dependency cancelled');
+      wake(ro, ownerOf(ro, workspace), detail, 'dependency cancelled');
     }
     if (to_status === 'pending_restart') {
       const n = store.order.getByStatus.all('pending_restart').length;
@@ -409,15 +423,15 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     const { actor } = req.body || {};
     const o = store.order.getById.get(req.params.id);
     if (!o) return res.status(404).json({ error: 'order not found' });
+    if (o.status !== 'paused') {
+      return res.status(400).json({ error: `${o.id} is ${o.status}; only paused orders can be resumed` });
+    }
     const target = resumeTargetOf(o);
     const result = transition(store, o.id, target, actor || 'unknown', 'resumed');
     if (!result.ok) return res.status(400).json({ error: result.error });
     store.order.setBlockFields.run(null, null, o.id);
-    // from_status comes from the row, not from an assumption. Resume is reachable from
-    // more than one state, and a card that says "paused" for an order that was rejected
-    // puts a false history in front of a human while the timeline says something else.
     card({ order_id: o.id, title: o.title, from_status: o.status, to_status: target, actor, assignee: o.assignee });
-    wake(result.order, ownerFor(result.order), `unblocked — back to ${target} on ${o.id} (${o.title}).`, 'unblocked', actor);
+    wake(result.order, ownerOf(result.order, workspace), `unblocked — back to ${target} on ${o.id} (${o.title}).`, 'unblocked', actor);
     res.json(store.order.getById.get(o.id));
   });
 

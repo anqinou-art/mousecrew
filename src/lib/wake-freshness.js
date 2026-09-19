@@ -8,10 +8,31 @@
 // So the check runs at *dequeue* time, not enqueue time — at enqueue the state is by
 // definition still fresh, which is exactly why checking there finds nothing.
 
-// Statuses where the work item genuinely needs nobody right now.
-// `rejected` and `draft` are deliberately NOT here: rejected means someone has to redo it,
-// draft means someone has to pick it up. `in_progress` is the state we are waking *for*.
-const SETTLED = new Set(['submitted', 'auditing', 'pending_restart', 'closed', 'accepted', 'paused']);
+const { resumeTargetOf } = require('./order-state-machine');
+
+/**
+ * Who owes the action represented by a work-order wake-up right now.
+ *
+ * This deliberately stays narrower than the nudge scheduler: it answers whether a queued
+ * message still belongs to its recipient. A paused order only reaches this function when
+ * a specific dependency notice was queued, so its recipient follows the state it would
+ * resume to rather than treating every paused order as generally actionable.
+ */
+function ownerOf(order, workspace) {
+  if (!order || !workspace) return undefined;
+  const status = order.status === 'paused' ? resumeTargetOf(order) : order.status;
+  if (status === 'assigned' || status === 'in_progress' || status === 'rejected') {
+    return order.assignee || null;
+  }
+  if (status === 'submitted' || status === 'auditing') {
+    if (workspace.isSelfManaged(order.assignee)) return null;
+    return workspace.mergeGate ? workspace.mergeGate.id : null;
+  }
+  if (status === 'draft' || status === 'pending_restart' || status === 'closed' || status === 'accepted') {
+    return null;
+  }
+  return undefined;
+}
 
 /**
  * Build a freshness predicate for one queued wake-up.
@@ -23,15 +44,26 @@ const SETTLED = new Set(['submitted', 'auditing', 'pending_restart', 'closed', '
  * (Note this is the opposite of require-token.js, which fails closed. Don't copy one into
  * the other; they are protecting different things.)
  */
-function makeWakeFreshness(store, orderId, { enqueuedStatus } = {}) {
+function makeWakeFreshness(store, orderId, { enqueuedStatus, recipient, workspace }) {
   return function freshness() {
     try {
       const o = store.order.getById.get(orderId);
       if (!o) return { skip: false };
-      if (SETTLED.has(o.status)) {
+
+      if (o.status !== enqueuedStatus) {
         return {
           skip: true,
-          reason: `order ${orderId} was ${enqueuedStatus || '?'} when queued, is ${o.status} now`,
+          reason: `order ${orderId} was ${enqueuedStatus} when queued, is ${o.status} now`,
+        };
+      }
+      const currentOwner = ownerOf(o, workspace);
+      if (currentOwner === undefined) return { skip: false };
+      if (currentOwner !== recipient) {
+        return {
+          skip: true,
+          reason: currentOwner
+            ? `order ${orderId} is now owned by ${currentOwner}, not ${recipient}`
+            : `order ${orderId} no longer owes an action to ${recipient}`,
         };
       }
       return { skip: false };
@@ -41,4 +73,4 @@ function makeWakeFreshness(store, orderId, { enqueuedStatus } = {}) {
   };
 }
 
-module.exports = { makeWakeFreshness, SETTLED };
+module.exports = { makeWakeFreshness, ownerOf };

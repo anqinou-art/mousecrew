@@ -27,6 +27,12 @@ const CREW = [
   { id: 'frontend', transport: 'terminal', terminal: { adapter: 'none' }, repos: ['app'], selfManaged: true },
 ].map(normalizeAgent);
 
+const REMOTE_GATE_CREW = [
+  { id: 'backend', transport: 'terminal', terminal: { adapter: 'none' }, repos: ['server'] },
+  { id: 'auditor', transport: 'remote', repos: ['server'], canMerge: true },
+  { id: 'frontend', transport: 'terminal', terminal: { adapter: 'none' }, repos: ['app'], selfManaged: true },
+].map(normalizeAgent);
+
 // `t` is required: cleanup is registered with t.after() so it runs even when an
 // assertion throws. Without that, a failing test leaves its HTTP server listening and the
 // runner never exits — a suite that hangs the moment it goes red is barely more useful
@@ -174,6 +180,38 @@ test('dispatch refuses states where accept cannot be the next action', async (t)
   assert.equal(r.status, 400);
   assert.match(r.body.error, /in_progress/);
   assert.equal((await call('GET', `/api/orders/${id}`)).body.status, 'in_progress');
+});
+
+test('the generic transition route cannot bypass the claim owner', async (t) => {
+  const { call, ctx } = await boot(t);
+  for (const status of ['draft', 'assigned', 'rejected']) {
+    const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+    place(ctx, id, status);
+    const denied = await call('POST', `/api/orders/${id}/transition`, {
+      to_status: 'in_progress', actor: 'frontend',
+    });
+    assert.equal(denied.status, 400, status);
+    assert.equal((await call('GET', `/api/orders/${id}`)).body.status, status);
+  }
+
+  const review = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  place(ctx, review, 'submitted');
+  const denied = await call('POST', `/api/orders/${review}/transition`, {
+    to_status: 'auditing', actor: 'backend',
+  });
+  assert.equal(denied.status, 400);
+  assert.equal((await call('GET', `/api/orders/${review}`)).body.status, 'submitted');
+});
+
+test('resume refuses an order that was never paused', async (t) => {
+  const { call, ctx } = await boot(t);
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  place(ctx, id, 'assigned');
+
+  const denied = await call('POST', `/api/orders/${id}/resume`, { actor: 'frontend' });
+  assert.equal(denied.status, 400);
+  assert.match(denied.body.error, /only paused orders/);
+  assert.equal((await call('GET', `/api/orders/${id}`)).body.status, 'assigned');
 });
 
 // ---------- the merge gate, at the route ----------
@@ -371,23 +409,44 @@ test('voiding work in review requires the merge gate and records the intent', as
   assert.match(last.comment, /^voided:/);
 });
 
-test('resume returns review work to review and wakes the merge gate', async (t) => {
-  const { call, ctx } = await boot(t);
+test('resume returns review work to review and delivers to the remote merge gate', async (t) => {
+  const { call, ctx } = await boot(t, REMOTE_GATE_CREW);
+  let delivered = 0;
+  ctx.manager.remotes.set('auditor', {
+    online: true,
+    sendFn: async () => { delivered++; return { text: 'reviewing' }; },
+  });
   const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
   place(ctx, id, 'auditing');
   assert.equal((await call('POST', `/api/orders/${id}/pause`, { actor: 'auditor', reason: 'waiting' })).status, 200);
   const resumed = await call('POST', `/api/orders/${id}/resume`, { actor: 'human' });
   assert.equal(resumed.status, 200);
   assert.equal(resumed.body.status, 'auditing');
+  assert.equal(delivered, 1);
 });
 
-test('the card a human sees says where the order actually came from', async (t) => {
-  // The row and the broadcast must not disagree. A card that claims "paused" for an order
-  // that was rejected puts a false history in front of the one reader who will not go and
-  // check the timeline.
+test('submitting work delivers to the remote merge gate', async (t) => {
+  const { call, ctx } = await boot(t, REMOTE_GATE_CREW);
+  let delivered = 0;
+  ctx.manager.remotes.set('auditor', {
+    online: true,
+    sendFn: async () => { delivered++; return { text: 'reviewing' }; },
+  });
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  place(ctx, id, 'in_progress');
+
+  const submitted = await call('POST', `/api/orders/${id}/transition`, {
+    to_status: 'submitted', actor: 'backend',
+  });
+  assert.equal(submitted.status, 200);
+  assert.equal(delivered, 1);
+});
+
+test('the resume card and timeline both name paused as the source', async (t) => {
   const { call, ctx } = await boot(t);
   const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
-  place(ctx, id, 'rejected');
+  place(ctx, id, 'in_progress');
+  await call('POST', `/api/orders/${id}/pause`, { actor: 'backend', reason: 'waiting' });
 
   const cards = [];
   ctx.hub.addClient({ write: (s) => { try { cards.push(JSON.parse(s.replace(/^data: /, ''))); } catch {} } });
@@ -395,7 +454,7 @@ test('the card a human sees says where the order actually came from', async (t) 
 
   const card = cards.find((c) => c.type === 'order_card' && c.order_id === id);
   assert.ok(card, 'a card was broadcast');
-  assert.equal(card.from_status, 'rejected');
+  assert.equal(card.from_status, 'paused');
 
   const tl = (await call('GET', `/api/orders/${id}`)).body.timeline;
   assert.equal(tl[tl.length - 1].from, card.from_status, 'the card and the timeline agree');
