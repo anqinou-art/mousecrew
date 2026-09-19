@@ -168,6 +168,9 @@ function open(dbPath) {
     setAssignee: db.prepare('UPDATE work_orders SET assignee = ? WHERE id = ?'),
     setCommitFields: db.prepare('UPDATE work_orders SET commit_hash = ?, git_branch = ?, files_changed = ? WHERE id = ?'),
     setBranch: db.prepare('UPDATE work_orders SET git_branch = ? WHERE id = ?'),
+    // Scheduler notes are history, not work-order movement. Touching updated_at here would
+    // make the scheduler read its own note as evidence that the assignee acted.
+    appendTimelineNote: db.prepare('UPDATE work_orders SET timeline = ? WHERE id = ?'),
     nextSeq: db.prepare("SELECT COUNT(*) AS n FROM work_orders"),
   };
 

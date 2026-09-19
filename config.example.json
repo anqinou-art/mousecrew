@@ -11,8 +11,11 @@
   "nudge": {
     "enabled": true,
     "scanMs": 300000,
-    "idleMs": 600000,
-    "dedupMs": 1800000
+    "claimIdleMs": 600000,
+    "progressIdleMs": 2400000,
+    "baseIntervalMs": 1800000,
+    "backoffCapMs": 14400000,
+    "backoffAfter": 3
   },
 
   "// delivery": "Terminal-window agents only: back-pressure and the staleness cutoff.",
