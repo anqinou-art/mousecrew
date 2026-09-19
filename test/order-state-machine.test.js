@@ -4,7 +4,16 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { open } = require('../src/db');
-const { checkTransition, transition, STATES } = require('../src/lib/order-state-machine');
+const {
+  checkTransition,
+  transition,
+  cancelEdgesFrom,
+  cancelIntentEdgesFrom,
+  isCancelClose,
+  resumeTargetOf,
+  canReachClosed,
+  STATES,
+} = require('../src/lib/order-state-machine');
 
 function freshStore() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-test-'));
@@ -28,7 +37,7 @@ function freshStore() {
 test('the happy path walks all the way to closed', () => {
   const s = freshStore();
   const id = s._make();
-  for (const to of ['in_progress', 'submitted', 'auditing', 'pending_restart', 'closed']) {
+  for (const to of ['assigned', 'in_progress', 'submitted', 'auditing', 'pending_restart', 'closed']) {
     const r = transition(s, id, to, 'tester');
     assert.equal(r.ok, true, `${to}: ${r.error || ''}`);
     assert.equal(r.order.status, to);
@@ -37,8 +46,8 @@ test('the happy path walks all the way to closed', () => {
 });
 
 test('an edge that is not in the table is refused', () => {
-  assert.equal(checkTransition('draft', 'closed').ok, false);
   assert.equal(checkTransition('draft', 'auditing').ok, false);
+  assert.equal(checkTransition('assigned', 'submitted').ok, false);
   assert.equal(checkTransition('closed', 'in_progress').ok, false);
   assert.equal(checkTransition('nonsense', 'closed').ok, false);
 });
@@ -98,6 +107,28 @@ test('auto-resume reports which orders it woke, so the caller can notify them', 
   s.close();
 });
 
+test('resume returns to the state that entered paused', () => {
+  for (const from of ['assigned', 'in_progress', 'auditing']) {
+    const order = { timeline: JSON.stringify([{ from, status: 'paused' }]) };
+    assert.equal(resumeTargetOf(order), from);
+  }
+  assert.equal(resumeTargetOf({ timeline: 'not-json' }), 'in_progress');
+  assert.equal(resumeTargetOf({ timeline: JSON.stringify([{ from: 'submitted', status: 'paused' }]) }), 'in_progress');
+});
+
+test('auto-resume uses the same target as manual resume', () => {
+  const s = freshStore();
+  const blocker = s._make({ status: 'accepted' });
+  const waiter = s._make({ status: 'auditing' });
+  transition(s, waiter, 'paused', 'gate', 'waiting');
+  s.order.setBlockFields.run(blocker, 'waiting', waiter);
+
+  transition(s, blocker, 'closed', 'owner');
+  assert.equal(s.order.getById.get(waiter).status, 'auditing');
+  assert.equal(s.order.getById.get(waiter).blocked_by, null);
+  s.close();
+});
+
 test('a paused order blocked on an unrelated order is not woken', () => {
   const s = freshStore();
   const one = s._make({ status: 'accepted' });
@@ -112,19 +143,39 @@ test('a paused order blocked on an unrelated order is not woken', () => {
   s.close();
 });
 
-test('every active state can be cancelled straight to closed', () => {
-  // Without this edge, killing a dead order means routing it through `accepted`, which
-  // stamps "verified and delivered" on work nobody did. A state machine that forces you
-  // to lie gets routed around.
-  for (const from of ['in_progress', 'submitted', 'paused', 'rejected']) {
-    assert.equal(checkTransition(from, 'closed').ok, true, `${from} -> closed should be allowed`);
-  }
+test('cancel edges and ambiguous close edges are derived from the table', () => {
+  assert.deepEqual([...cancelEdgesFrom()].sort(), ['assigned', 'draft', 'in_progress', 'paused']);
+  assert.deepEqual([...cancelIntentEdgesFrom()].sort(), ['auditing', 'draft']);
+  assert.equal(isCancelClose('assigned', 'closed'), true);
+  assert.equal(isCancelClose('draft', 'closed'), false);
+  assert.equal(isCancelClose('draft', 'closed', { cancelled: true }), true);
+  assert.equal(isCancelClose('auditing', 'closed'), false);
+  assert.equal(isCancelClose('auditing', 'closed', { cancelled: true }), true);
+  assert.equal(isCancelClose('pending_restart', 'closed'), false);
+});
+
+test('cancelled blockers stay paused and are reported to the caller', () => {
   const s = freshStore();
-  const id = s._make({ status: 'in_progress' });
-  const r = transition(s, id, 'closed', 'human', 'cancelled: no longer needed');
+  const blocker = s._make({ status: 'in_progress' });
+  const waiter = s._make({ status: 'in_progress' });
+  transition(s, waiter, 'paused', 'tester', 'waiting');
+  s.order.setBlockFields.run(blocker, 'waiting', waiter);
+
+  const r = transition(s, blocker, 'closed', 'human', 'cancelled: no longer needed', { cancelled: true });
   assert.equal(r.ok, true);
-  assert.equal(r.order.status, 'closed');
+  assert.deepEqual(r.blockedSkipped, [waiter]);
+  assert.equal(r.autoResumed, undefined);
+  assert.equal(s.order.getById.get(waiter).status, 'paused');
+  assert.equal(s.order.getById.get(waiter).blocked_by, blocker);
   s.close();
+});
+
+test('only a state that can still reach closed is a live blocker', () => {
+  for (const state of STATES.filter((state) => state !== 'closed')) {
+    assert.equal(canReachClosed(state), true, state);
+  }
+  assert.equal(canReachClosed('closed'), false);
+  assert.equal(canReachClosed('unknown'), false);
 });
 
 test('a rejected order goes back to work rather than dying', () => {

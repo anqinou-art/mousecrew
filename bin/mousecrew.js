@@ -67,14 +67,15 @@ function flags(argv) {
   const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a.startsWith('--')) { out[a.slice(2)] = argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : true; }
+    if (a === '--void') out.void = true;
+    else if (a.startsWith('--')) { out[a.slice(2)] = argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : true; }
     else if (a === '-s') out.actor = argv[++i];
     else out._.push(a);
   }
   return out;
 }
 
-const NEXT = { draft: 'in_progress', in_progress: 'submitted', submitted: 'auditing', rejected: 'in_progress' };
+const NEXT = { draft: 'in_progress', in_progress: 'submitted', rejected: 'in_progress' };
 
 const USAGE = `mousecrew — drive the work board
 
@@ -82,13 +83,15 @@ const USAGE = `mousecrew — drive the work board
   show <id>                               one order with its timeline and agent logs
   create --title "..." [--assignee X] [--repo R] [--desc "..."] [-s me]
   start <id> [-s me]                      draft -> in_progress
+  dispatch <id> [--assignee X] [-s me]    draft -> assigned and notify the assignee
+  accept <id> -s me                       accept assigned work, review, or rework
   advance <id> [-s me] [--commit SHA] [--branch B] ["note"]
                                           move to the next state in the lane
   audit-pass <id> [-s me] [--no-restart] ["note"]
   audit-fail <id> [-s me] "reason"
   pause <id> [-s me] --blocked-by <id> "why"
   resume <id> [-s me]
-  cancel <id> [-s me] "why"               any active state -> closed
+  cancel <id> [-s me] [--void] "why"      cancel work; --void closes work in review
   restart-done [-s me]                    close everything that was waiting on a restart
   comment <id> [-s me] "text"
   say [--as name] [--no-redispatch] "text"    post to the group
@@ -114,7 +117,7 @@ async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   const f = flags(rest);
   const id = f._[0];
-  const note = f._[1] || f._[0];
+  const note = f._.slice(1).join(' ');
 
   switch (cmd) {
     case 'list': {
@@ -137,12 +140,21 @@ async function main() {
 
     case 'create': {
       if (!f.title) die('need --title');
+      const actor = f.actor || 'cli';
+      const assignee = f.assignee || f.actor || null;
       const o = await api('POST', '/api/orders', {
         title: f.title, description: f.desc || null,
-        assignee: f.assignee || f.actor || null, repo: f.repo || null, actor: f.actor || 'cli',
+        assignee, repo: f.repo || null, actor,
       });
-      await api('POST', `/api/orders/${o.id}/transition`, { to_status: 'in_progress', actor: f.actor || 'cli', comment: 'created' });
-      console.log(`created ${o.id} -> in_progress${o.assignee ? ` (@${o.assignee})` : ''}`);
+      let status = 'draft';
+      if (assignee && f.actor && assignee === f.actor) {
+        const started = await api('POST', `/api/orders/${o.id}/transition`, { to_status: 'in_progress', actor, comment: 'created and started' });
+        status = started.status;
+      } else if (assignee) {
+        const dispatched = await api('POST', `/api/orders/${o.id}/dispatch`, { actor });
+        status = dispatched.order.status;
+      }
+      console.log(`created ${o.id} -> ${status}${assignee ? ` (@${assignee})` : ''}`);
       break;
     }
 
@@ -150,6 +162,24 @@ async function main() {
       if (!id) die('need <id>');
       const r = await api('POST', `/api/orders/${id}/transition`, { to_status: 'in_progress', actor: f.actor || 'cli' });
       console.log(`${id} -> ${r.status}`);
+      break;
+    }
+
+    case 'dispatch': {
+      if (!id) die('need <id>');
+      if (f.assignee) {
+        await api('POST', `/api/orders/${id}/assign`, { assignee: f.assignee, actor: f.actor || 'cli' });
+      }
+      const r = await api('POST', `/api/orders/${id}/dispatch`, { actor: f.actor || 'cli' });
+      console.log(`${id} -> ${r.order.status} (@${r.order.assignee})`);
+      break;
+    }
+
+    case 'accept': {
+      if (!id) die('need <id>');
+      if (!f.actor) die('need -s <me> — accepting without an actor would not confirm who took it');
+      const r = await api('POST', `/api/orders/${id}/accept`, { actor: f.actor });
+      console.log(`${id} ${r.from} -> ${r.to}`);
       break;
     }
 
@@ -191,6 +221,7 @@ async function main() {
 
     case 'pause': {
       if (!id) die('need <id>');
+      if (!f['blocked-by']) die('need --blocked-by <id>');
       const r = await api('POST', `/api/orders/${id}/pause`, { actor: f.actor || 'cli', blocked_by: f['blocked-by'], reason: note || '' });
       console.log(`${id} paused (blocked_by=${r.blocked_by || '-'})`);
       break;
@@ -205,8 +236,18 @@ async function main() {
 
     case 'cancel': {
       if (!id) die('need <id>');
-      const r = await api('POST', `/api/orders/${id}/transition`, { to_status: 'closed', actor: f.actor || 'cli', comment: `cancelled: ${note || 'no reason given'}` });
-      console.log(`${id} -> ${r.status} (cancelled)`);
+      if (!note.trim()) die('need a cancellation reason');
+      const o = await api('GET', `/api/orders/${id}`);
+      const pausedFrom = Array.isArray(o.timeline)
+        ? [...o.timeline].reverse().find((entry) => entry && entry.status === 'paused')?.from
+        : null;
+      const inReview = o.status === 'auditing' || (o.status === 'paused' && pausedFrom === 'auditing');
+      if (inReview && !f.void) die(`${id} is in review; use --void to make that intent explicit`);
+      if (f.void && !inReview) die('--void is only for an auditing order or one paused from auditing');
+      const r = await api('POST', `/api/orders/${id}/transition`, {
+        to_status: 'closed', actor: f.actor || 'cli', comment: note, cancelled: true,
+      });
+      console.log(`${id} -> ${r.status} (${f.void ? 'voided' : 'cancelled'})`);
       break;
     }
 

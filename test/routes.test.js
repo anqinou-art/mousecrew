@@ -126,6 +126,56 @@ test('finished work cannot be reassigned', async (t) => {
   assert.match(r.body.error, /reassigning finished work/);
 });
 
+test('dispatch records assigned, and accept records who took the work', async (t) => {
+  const { call } = await boot(t);
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+
+  const dispatched = await call('POST', `/api/orders/${id}/dispatch`, { actor: 'human' });
+  assert.equal(dispatched.status, 200);
+  assert.equal(dispatched.body.order.status, 'assigned');
+
+  const wrong = await call('POST', `/api/orders/${id}/accept`, { actor: 'frontend' });
+  assert.equal(wrong.status, 400);
+  assert.equal((await call('GET', `/api/orders/${id}`)).body.status, 'assigned');
+
+  const accepted = await call('POST', `/api/orders/${id}/accept`, { actor: 'backend' });
+  assert.equal(accepted.status, 200);
+  assert.deepEqual({ from: accepted.body.from, to: accepted.body.to }, { from: 'assigned', to: 'in_progress' });
+  const timeline = (await call('GET', `/api/orders/${id}`)).body.timeline;
+  assert.deepEqual(timeline.map((entry) => entry.status), ['draft', 'assigned', 'in_progress']);
+});
+
+test('the merge gate accepts submitted work; the assignee cannot accept it for review', async (t) => {
+  const { call, ctx } = await boot(t);
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  place(ctx, id, 'submitted');
+
+  assert.equal((await call('POST', `/api/orders/${id}/accept`, { actor: 'backend' })).status, 400);
+  const accepted = await call('POST', `/api/orders/${id}/accept`, { actor: 'auditor' });
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.body.order.status, 'auditing');
+});
+
+test('accept does not route self-managed work into review', async (t) => {
+  const { call, ctx } = await boot(t);
+  const id = await newOrder(call, { assignee: 'frontend', repo: 'app' });
+  place(ctx, id, 'submitted');
+  const r = await call('POST', `/api/orders/${id}/accept`, { actor: 'auditor' });
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /no merge gate/);
+  assert.equal((await call('GET', `/api/orders/${id}`)).body.status, 'submitted');
+});
+
+test('dispatch refuses states where accept cannot be the next action', async (t) => {
+  const { call, ctx } = await boot(t);
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  place(ctx, id, 'in_progress');
+  const r = await call('POST', `/api/orders/${id}/dispatch`, { actor: 'human' });
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /in_progress/);
+  assert.equal((await call('GET', `/api/orders/${id}`)).body.status, 'in_progress');
+});
+
 // ---------- the merge gate, at the route ----------
 
 test('a non-gate agent cannot take an order past review', async (t) => {
@@ -215,6 +265,23 @@ test('with a merge gate, review is of course still open', async (t) => {
   assert.equal(r.status, 200);
 });
 
+test('public direct-close edges are only for self-managed or gate-less crews', async (t) => {
+  const { call, ctx } = await boot(t);
+  for (const status of ['submitted', 'rejected']) {
+    const gated = await newOrder(call, { assignee: 'backend', repo: 'server' });
+    place(ctx, gated, status);
+    assert.equal((await call('POST', `/api/orders/${gated}/transition`, {
+      to_status: 'closed', actor: 'human', comment: 'done',
+    })).status, 409, status);
+
+    const selfManaged = await newOrder(call, { assignee: 'frontend', repo: 'app' });
+    place(ctx, selfManaged, status);
+    assert.equal((await call('POST', `/api/orders/${selfManaged}/transition`, {
+      to_status: 'closed', actor: 'human', comment: 'accepted',
+    })).status, 200, status);
+  }
+});
+
 test('a working agent cannot wipe the restart queue', async (t) => {
   // Not about bad merges — the merge already happened. It is about the record of what is
   // still waiting to go live quietly disappearing.
@@ -236,9 +303,9 @@ test('a working agent cannot wipe the restart queue', async (t) => {
 test('an illegal edge is refused before anything else happens', async (t) => {
   const { call } = await boot(t);
   const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
-  const r = await call('POST', `/api/orders/${id}/transition`, { to_status: 'closed', actor: 'human' });
+  const r = await call('POST', `/api/orders/${id}/transition`, { to_status: 'auditing', actor: 'human' });
   assert.equal(r.status, 400);
-  assert.match(r.body.error, /draft -> closed not allowed/);
+  assert.match(r.body.error, /draft -> auditing not allowed/);
 });
 
 test('blocking on an order that does not exist is refused', async (t) => {
@@ -247,6 +314,71 @@ test('blocking on an order that does not exist is refused', async (t) => {
   place(ctx, id, 'in_progress');
   const r = await call('POST', `/api/orders/${id}/pause`, { actor: 'human', blocked_by: 'WO-999', reason: 'typo' });
   assert.equal(r.status, 400);
+});
+
+test('blocking on an already closed order is refused', async (t) => {
+  const { call, ctx } = await boot(t);
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  const blocker = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  place(ctx, id, 'in_progress');
+  place(ctx, blocker, 'closed');
+  const r = await call('POST', `/api/orders/${id}/pause`, {
+    actor: 'human', blocked_by: blocker, reason: 'too late',
+  });
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /cannot reach closed again/);
+});
+
+test('cancellation requires a reason and does not revive blocked work', async (t) => {
+  const { call, ctx } = await boot(t);
+  const blocker = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  const waiter = await newOrder(call, { assignee: 'frontend', repo: 'app' });
+  place(ctx, blocker, 'in_progress');
+  place(ctx, waiter, 'in_progress');
+  assert.equal((await call('POST', `/api/orders/${waiter}/pause`, {
+    actor: 'frontend', blocked_by: blocker, reason: 'waiting',
+  })).status, 200);
+
+  const noReason = await call('POST', `/api/orders/${blocker}/transition`, {
+    to_status: 'closed', actor: 'human', cancelled: true,
+  });
+  assert.equal(noReason.status, 400);
+
+  const cancelled = await call('POST', `/api/orders/${blocker}/transition`, {
+    to_status: 'closed', actor: 'human', comment: 'contract removed', cancelled: true,
+  });
+  assert.equal(cancelled.status, 200);
+  assert.deepEqual(cancelled.body.blockedSkipped, [waiter]);
+  const stillPaused = await call('GET', `/api/orders/${waiter}`);
+  assert.equal(stillPaused.body.status, 'paused');
+  assert.equal(stillPaused.body.blocked_by, blocker);
+});
+
+test('voiding work in review requires the merge gate and records the intent', async (t) => {
+  const { call, ctx } = await boot(t);
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  place(ctx, id, 'auditing');
+
+  assert.equal((await call('POST', `/api/orders/${id}/transition`, {
+    to_status: 'closed', actor: 'backend', comment: 'obsolete', cancelled: true,
+  })).status, 403);
+  const closed = await call('POST', `/api/orders/${id}/transition`, {
+    to_status: 'closed', actor: 'auditor', comment: 'obsolete', cancelled: true,
+  });
+  assert.equal(closed.status, 200);
+  const last = (await call('GET', `/api/orders/${id}`)).body.timeline.at(-1);
+  assert.equal(last.cancelled, true);
+  assert.match(last.comment, /^voided:/);
+});
+
+test('resume returns review work to review and wakes the merge gate', async (t) => {
+  const { call, ctx } = await boot(t);
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  place(ctx, id, 'auditing');
+  assert.equal((await call('POST', `/api/orders/${id}/pause`, { actor: 'auditor', reason: 'waiting' })).status, 200);
+  const resumed = await call('POST', `/api/orders/${id}/resume`, { actor: 'human' });
+  assert.equal(resumed.status, 200);
+  assert.equal(resumed.body.status, 'auditing');
 });
 
 test('the card a human sees says where the order actually came from', async (t) => {
