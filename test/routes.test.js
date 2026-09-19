@@ -214,6 +214,26 @@ test('resume refuses an order that was never paused', async (t) => {
   assert.equal((await call('GET', `/api/orders/${id}`)).body.status, 'assigned');
 });
 
+test('paused work can only return to the state it was paused from', async (t) => {
+  const { call } = await boot(t);
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  assert.equal((await call('POST', `/api/orders/${id}/dispatch`, { actor: 'human' })).status, 200);
+  assert.equal((await call('POST', `/api/orders/${id}/pause`, {
+    actor: 'human', reason: 'waiting',
+  })).status, 200);
+
+  const bypass = await call('POST', `/api/orders/${id}/transition`, {
+    to_status: 'in_progress', actor: 'frontend',
+  });
+  assert.equal(bypass.status, 400);
+  assert.match(bypass.body.error, /paused from assigned/);
+  assert.equal((await call('GET', `/api/orders/${id}`)).body.status, 'paused');
+
+  const resumed = await call('POST', `/api/orders/${id}/resume`, { actor: 'human' });
+  assert.equal(resumed.status, 200);
+  assert.equal(resumed.body.status, 'assigned');
+});
+
 // ---------- the merge gate, at the route ----------
 
 test('a non-gate agent cannot take an order past review', async (t) => {

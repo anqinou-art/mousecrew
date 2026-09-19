@@ -81,6 +81,19 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     return { owner, role };
   }
 
+  function checkResumeTarget(order, toStatus) {
+    if (order.status === 'paused' && toStatus !== 'closed') {
+      const target = resumeTargetOf(order);
+      if (toStatus !== target) {
+        return {
+          ok: false,
+          error: `${order.id} was paused from ${target}; it cannot resume to ${toStatus}`,
+        };
+      }
+    }
+    return { ok: true };
+  }
+
   function checkClaimOwner(order, toStatus, actor) {
     const claim = claimFor(order, toStatus);
     if (!claim) return { ok: true };
@@ -231,6 +244,8 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     // Gate first. Everything below this line may cost real work.
     const gate = checkTransition(o.status, to_status);
     if (!gate.ok) return res.status(400).json({ error: gate.error });
+    const resumeGate = checkResumeTarget(o, to_status);
+    if (!resumeGate.ok) return res.status(400).json({ error: resumeGate.error });
 
     if (cancelled !== undefined && typeof cancelled !== 'boolean') {
       return res.status(400).json({ error: 'cancelled must be a boolean' });
@@ -427,6 +442,8 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
       return res.status(400).json({ error: `${o.id} is ${o.status}; only paused orders can be resumed` });
     }
     const target = resumeTargetOf(o);
+    const resumeGate = checkResumeTarget(o, target);
+    if (!resumeGate.ok) return res.status(400).json({ error: resumeGate.error });
     const result = transition(store, o.id, target, actor || 'unknown', 'resumed');
     if (!result.ok) return res.status(400).json({ error: result.error });
     store.order.setBlockFields.run(null, null, o.id);
