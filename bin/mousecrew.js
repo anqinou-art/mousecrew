@@ -87,8 +87,9 @@ const USAGE = `mousecrew — drive the work board
   accept <id> -s me                       accept assigned work, review, or rework
   advance <id> [-s me] [--commit SHA] [--branch B] ["note"]
                                           move to the next state in the lane
-  audit-pass <id> [-s me] [--no-restart] ["note"]
-  audit-fail <id> [-s me] "reason"
+  audit-pass <id> [-s me] --rev N [--no-restart] ["note"]
+  audit-fail <id> [-s me] --rev N "reason"
+  unfreeze <id> -s me --reason "why"       withdraw review and return it for changes
   pause <id> [-s me] --blocked-by <id> "why"
   resume <id> [-s me]
   cancel <id> [-s me] [--void] "why"      cancel work; --void closes work in review
@@ -134,7 +135,12 @@ async function main() {
 
     case 'show': {
       if (!id) die('need <id>');
-      console.log(JSON.stringify(await api('GET', `/api/orders/${id}`), null, 2));
+      const o = await api('GET', `/api/orders/${id}`);
+      console.log(JSON.stringify(o, null, 2));
+      if (o.frozen) {
+        const snapshot = (o.revisions || []).find((row) => row.audit_revision === o.audit_revision);
+        console.log(`frozen at rev ${o.audit_revision} (commit ${(snapshot && snapshot.commit_hash) || '-'})`);
+      }
       break;
     }
 
@@ -206,16 +212,36 @@ async function main() {
 
     case 'audit-pass': {
       if (!id) die('need <id>');
+      if (f.rev === undefined || !/^\d+$/.test(String(f.rev))) die('need --rev <N>');
       const to = f['no-restart'] ? 'closed' : 'pending_restart';
-      const r = await api('POST', `/api/orders/${id}/transition`, { to_status: to, actor: f.actor || 'cli', comment: note || 'merged' });
+      const r = await api('POST', `/api/orders/${id}/transition`, {
+        to_status: to, actor: f.actor || 'cli', comment: note || 'merged',
+        audit_revision: Number(f.rev),
+      });
       console.log(`${id} -> ${r.status}`);
       break;
     }
 
     case 'audit-fail': {
       if (!id) die('need <id>');
-      const r = await api('POST', `/api/orders/${id}/transition`, { to_status: 'rejected', actor: f.actor || 'cli', comment: note || '' });
+      if (f.rev === undefined || !/^\d+$/.test(String(f.rev))) die('need --rev <N>');
+      const r = await api('POST', `/api/orders/${id}/transition`, {
+        to_status: 'rejected', actor: f.actor || 'cli', comment: note || '',
+        audit_revision: Number(f.rev),
+      });
       console.log(`${id} -> ${r.status}: ${note || ''}`);
+      break;
+    }
+
+    case 'unfreeze': {
+      if (!id) die('need <id>');
+      if (!f.actor) die('need -s <me>');
+      if (!String(f.reason || '').trim()) die('need --reason "why"');
+      const r = await api('POST', `/api/orders/${id}/unfreeze`, {
+        actor: f.actor,
+        reason: String(f.reason).trim(),
+      });
+      console.log(`${id} unfrozen from rev ${r.unfrozen_revision}`);
       break;
     }
 

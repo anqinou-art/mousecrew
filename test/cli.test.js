@@ -130,3 +130,38 @@ test('cancel fails closed on a missing reason, and review work requires --void',
   assert.equal(voidApi.requests[1].body.comment, 'obsolete');
   assert.equal(voidApi.requests[1].body.cancelled, true);
 });
+
+test('audit decisions require the reviewer to name the revision', async (t) => {
+  const missingApi = await scriptedApi(t, []);
+  const missing = await runCli(['audit-pass', 'WO-001', '-s', 'auditor'], missingApi.base);
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /--rev/);
+  assert.equal(missingApi.requests.length, 0);
+
+  const passApi = await scriptedApi(t, [{ body: { status: 'pending_restart' } }]);
+  const passed = await runCli(['audit-pass', 'WO-001', '-s', 'auditor', '--rev', '2'], passApi.base);
+  assert.equal(passed.code, 0, passed.stderr);
+  assert.equal(passApi.requests[0].body.audit_revision, 2);
+
+  const failApi = await scriptedApi(t, [{ body: { status: 'rejected' } }]);
+  const failed = await runCli(['audit-fail', 'WO-001', '-s', 'auditor', '--rev', '2', 'needs changes'], failApi.base);
+  assert.equal(failed.code, 0, failed.stderr);
+  assert.equal(failApi.requests[0].body.audit_revision, 2);
+});
+
+test('unfreeze requires an actor and reason, and show calls out the frozen snapshot', async (t) => {
+  const unfreezeApi = await scriptedApi(t, [{ body: { unfrozen_revision: 3 } }]);
+  const result = await runCli([
+    'unfreeze', 'WO-001', '-s', 'worker', '--reason', 'replace delivery',
+  ], unfreezeApi.base);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(unfreezeApi.requests[0].body, { actor: 'worker', reason: 'replace delivery' });
+
+  const showApi = await scriptedApi(t, [{ body: {
+    id: 'WO-001', frozen: 1, audit_revision: 3,
+    revisions: [{ audit_revision: 3, commit_hash: 'abc123' }],
+  } }]);
+  const shown = await runCli(['show', 'WO-001'], showApi.base);
+  assert.equal(shown.code, 0, shown.stderr);
+  assert.match(shown.stdout, /frozen at rev 3 \(commit abc123\)/);
+});

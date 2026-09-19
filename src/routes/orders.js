@@ -15,6 +15,7 @@ const {
 } = require('../lib/order-state-machine');
 const { verifyCommit, makeVerifyBudget } = require('../lib/commit-verify');
 const { makeWakeFreshness, ownerOf } = require('../lib/wake-freshness');
+const { createAuditFreeze } = require('../lib/audit-freeze');
 
 const CLAIM_TARGETS = {
   draft: 'in_progress',
@@ -27,6 +28,7 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
   const router = express.Router();
   const takeBudget = makeVerifyBudget(config.verifyBudget || {});
   const verifyRepos = (config.verifyRepos || []).slice();
+  const auditFreeze = createAuditFreeze(store);
 
   router.use(requireToken);
 
@@ -43,6 +45,20 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     });
   }
 
+  function sendNotice(order, recipient, text, title, actor, freshness) {
+    if (!recipient) return;
+    const recipientId = identity.normalizeAgentId(recipient);
+    if (actor && identity.normalizeAgentId(actor) === recipientId) return;
+    const mention = identity.displayNameOf(recipientId);
+    const content = `@${mention} ${text}`;
+    bus.emit('group:dispatch_mentions', {
+      content, sender: 'system',
+      ...(freshness ? { freshness } : {}),
+    });
+    bus.emit('group:post', { role: 'user', content, sender: 'system' });
+    notifier.send(title, `${order.id} @${mention}: ${order.title}`).catch(() => {});
+  }
+
   /**
    * Wake whoever now owes an action, on whichever transport they live.
    *
@@ -53,22 +69,57 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
   function wake(order, recipient, text, title = 'new work', actor) {
     if (!recipient) return;
     const recipientId = identity.normalizeAgentId(recipient);
-    if (actor && identity.normalizeAgentId(actor) === recipientId) return;
-    const mention = identity.displayNameOf(recipientId);
-    const content = `@${mention} ${text}`;
-    // Carry the order id so the wake-up can be re-checked when it reaches the front of
-    // the queue — by then the order may have moved on without it.
-    bus.emit('group:dispatch_mentions', {
-      content, sender: 'system',
-      freshness: makeWakeFreshness(store, order.id, {
+    sendNotice(
+      order,
+      recipientId,
+      text,
+      title,
+      actor,
+      // Carry the order id so the wake-up can be re-checked when it reaches the front of
+      // the queue — by then the order may have moved on without it.
+      makeWakeFreshness(store, order.id, {
         enqueuedStatus: order.status,
         recipient: recipientId,
         workspace,
       }),
-    });
-    bus.emit('group:post', { role: 'user', content, sender: 'system' });
-    notifier.send(title, `${order.id} @${mention}: ${order.title}`).catch(() => {});
+    );
   }
+
+  // A review state and its freeze flag are one fact: either both writes land or neither does.
+  const moveOrder = store.db.transaction((orderId, toStatus, actor, comment, meta, delivery) => {
+    const before = store.order.getById.get(orderId);
+    const commitMeta = delivery ? backfill(before, delivery) : null;
+    const timelineMeta = {
+      ...(commitMeta ? commitMeta.timelineMeta : {}),
+      ...(meta || {}),
+    };
+    const result = transition(
+      store,
+      orderId,
+      toStatus,
+      actor,
+      comment,
+      Object.keys(timelineMeta).length ? timelineMeta : undefined,
+    );
+    if (!result.ok) return result;
+
+    const auditChange = auditFreeze.applyOnTransition(
+      result.order,
+      before.status,
+      toStatus,
+      actor,
+    );
+    for (const resumedId of result.autoResumed || []) {
+      const resumed = store.order.getById.get(resumedId);
+      auditFreeze.applyOnTransition(resumed, 'paused', resumed.status, 'system');
+    }
+    return {
+      ...result,
+      order: store.order.getById.get(orderId),
+      auditChange,
+      commitMeta,
+    };
+  });
 
   function claimFor(order, toStatus) {
     if (CLAIM_TARGETS[order.status] !== toStatus) return null;
@@ -150,7 +201,12 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
   router.get('/api/orders/:id', (req, res) => {
     const o = store.order.getById.get(req.params.id);
     if (!o) return res.status(404).json({ error: 'order not found' });
-    res.json({ ...o, timeline: o.timeline ? JSON.parse(o.timeline) : [], logs: store.log.byOrder.all(o.id) });
+    res.json({
+      ...o,
+      timeline: o.timeline ? JSON.parse(o.timeline) : [],
+      logs: store.log.byOrder.all(o.id),
+      revisions: store.orderRevision.byOrder.all(o.id),
+    });
   });
 
   router.get('/api/orders/meta/states', (req, res) => res.json({ states: STATES }));
@@ -193,7 +249,7 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     if (!o.assignee) return res.status(400).json({ error: 'dispatch requires an assignee' });
 
     if (o.status === 'draft') {
-      const moved = transition(store, o.id, 'assigned', (req.body && req.body.actor) || 'system', 'dispatched');
+      const moved = moveOrder(o.id, 'assigned', (req.body && req.body.actor) || 'system', 'dispatched');
       if (!moved.ok) return res.status(400).json({ error: moved.error });
       card({
         order_id: o.id, title: o.title, from_status: 'draft', to_status: 'assigned',
@@ -224,19 +280,19 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     const claim = checkClaimOwner(o, toStatus, actor);
     if (!claim.ok) return res.status(400).json({ error: claim.error });
 
-    const result = transition(store, o.id, toStatus, actor, `${claim.role} accepted`);
+    const result = moveOrder(o.id, toStatus, actor, `${claim.role} accepted`);
     if (!result.ok) return res.status(400).json({ error: result.error });
     card({
       order_id: o.id, title: o.title, from_status: o.status, to_status: toStatus,
       actor, assignee: result.order.assignee, comment: `${claim.role} accepted`,
     });
-    res.json({ ok: true, order: result.order, from: o.status, to: toStatus });
+    res.json({ ok: true, order: result.order, from: o.status, to: toStatus, ...result.auditChange });
   });
 
   // ---------- transition ----------
 
   router.post('/api/orders/:id/transition', (req, res) => {
-    const { to_status, actor, comment, commit_hash, git_branch, cancelled } = req.body || {};
+    const { to_status, actor, comment, commit_hash, git_branch, cancelled, audit_revision } = req.body || {};
     const o = store.order.getById.get(req.params.id);
     if (!o) return res.status(404).json({ error: 'order not found' });
     if (!to_status) return res.status(400).json({ error: 'to_status required' });
@@ -257,6 +313,19 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     const isCancellation = isCancelClose(o.status, to_status, cancelMeta);
     if (isCancellation && !String(comment || '').trim()) {
       return res.status(400).json({ error: 'a cancellation or void requires a reason' });
+    }
+
+    if (commit_hash || git_branch) {
+      const blocked = auditFreeze.freezeBlocks(o);
+      if (blocked) return res.status(409).json(blocked);
+    }
+
+    const revisionGate = auditFreeze.checkRevision(o, to_status, cancelled, audit_revision);
+    if (!revisionGate.ok) {
+      return res.status(revisionGate.status).json({
+        error: revisionGate.error,
+        ...(revisionGate.audit_revision ? { audit_revision: revisionGate.audit_revision } : {}),
+      });
     }
 
     // Only the single merge-gate agent may push an order past review.
@@ -312,23 +381,18 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     const claim = checkClaimOwner(o, to_status, actor);
     if (!claim.ok) return res.status(400).json({ error: claim.error });
 
-    let commitMeta;
-    if (commit_hash || git_branch) commitMeta = backfill(o, { commit_hash, git_branch });
-    const timelineMeta = {
-      ...(commitMeta ? commitMeta.timelineMeta : {}),
-      ...(isCancellation ? { cancelled: true } : {}),
-    };
+    const delivery = commit_hash || git_branch ? { commit_hash, git_branch } : null;
     const transitionComment = isCancellation
       ? `${o.status === 'auditing' || resumeTargetOf(o) === 'auditing' ? 'voided' : 'cancelled'}: ${String(comment).trim()}`
       : comment;
 
-    const result = transition(
-      store,
+    const result = moveOrder(
       o.id,
       to_status,
       actor || 'unknown',
       transitionComment,
-      Object.keys(timelineMeta).length ? timelineMeta : undefined,
+      isCancellation ? { cancelled: true } : undefined,
+      delivery,
     );
     if (!result.ok) return res.status(400).json({ error: result.error });
 
@@ -359,7 +423,7 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
       ...result.order,
       ...(result.autoResumed ? { autoResumed: result.autoResumed } : {}),
       ...(result.blockedSkipped ? { blockedSkipped: result.blockedSkipped } : {}),
-      ...(commitMeta ? { commit_verify: commitMeta.report } : {}),
+      ...(result.commitMeta ? { commit_verify: result.commitMeta.report } : {}),
     });
   });
 
@@ -427,7 +491,7 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
         });
       }
     }
-    const result = transition(store, o.id, 'paused', actor || 'unknown', reason);
+    const result = moveOrder(o.id, 'paused', actor || 'unknown', reason);
     if (!result.ok) return res.status(400).json({ error: result.error });
     store.order.setBlockFields.run(blocked_by || null, reason || null, o.id);
     card({ order_id: o.id, title: o.title, from_status: o.status, to_status: 'paused', actor, assignee: o.assignee, comment: reason });
@@ -444,12 +508,58 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     const target = resumeTargetOf(o);
     const resumeGate = checkResumeTarget(o, target);
     if (!resumeGate.ok) return res.status(400).json({ error: resumeGate.error });
-    const result = transition(store, o.id, target, actor || 'unknown', 'resumed');
+    const result = moveOrder(o.id, target, actor || 'unknown', 'resumed');
     if (!result.ok) return res.status(400).json({ error: result.error });
     store.order.setBlockFields.run(null, null, o.id);
     card({ order_id: o.id, title: o.title, from_status: o.status, to_status: target, actor, assignee: o.assignee });
     wake(result.order, ownerOf(result.order, workspace), `unblocked — back to ${target} on ${o.id} (${o.title}).`, 'unblocked', actor);
     res.json(store.order.getById.get(o.id));
+  });
+
+  router.post('/api/orders/:id/unfreeze', (req, res) => {
+    const o = store.order.getById.get(req.params.id);
+    if (!o) return res.status(404).json({ error: 'order not found' });
+    const { actor, reason } = req.body || {};
+    if (!actor) return res.status(400).json({ error: 'actor required' });
+    if (!String(reason || '').trim()) return res.status(400).json({ error: 'unfreeze requires a reason' });
+    if (!o.frozen || o.status !== 'auditing') {
+      return res.status(400).json({ error: `${o.id} is not frozen in review` });
+    }
+
+    const who = identity.normalizeAgentId(actor);
+    const allowed = new Set([
+      identity.normalizeAgentId(o.assignee),
+      workspace.mergeGate && workspace.mergeGate.id,
+      identity.normalizeAgentId(o.created_by),
+    ].filter(Boolean));
+    if (!allowed.has(who)) {
+      return res.status(403).json({ error: `${who} is not the assignee, merge gate, or order owner` });
+    }
+
+    const revision = o.audit_revision;
+    const result = moveOrder(
+      o.id,
+      'in_progress',
+      actor,
+      `unfroze revision ${revision}: ${String(reason).trim()}`,
+    );
+    if (!result.ok) return res.status(400).json({ error: result.error });
+    card({
+      order_id: o.id, title: o.title, from_status: o.status, to_status: 'in_progress',
+      actor, assignee: result.order.assignee, comment: `unfroze revision ${revision}`,
+    });
+    const gate = workspace.mergeGate && workspace.mergeGate.id;
+    // This reports a fact, not an action still owed. Once a revision is invalidated the
+    // notice never becomes stale, so attaching owner-based wake freshness would drop it.
+    sendNotice(
+      result.order,
+      gate,
+      `${o.id} review revision ${revision} was invalidated: ${String(reason).trim()}`,
+      'review invalidated',
+      null,
+      null,
+    );
+    res.json({ ok: true, order: result.order, unfrozen_revision: revision });
   });
 
   // ---------- assignment ----------
@@ -490,7 +600,7 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     }
     const closed = [];
     for (const o of store.order.getByStatus.all('pending_restart')) {
-      const r = transition(store, o.id, 'closed', actor || 'system', 'closed after restart');
+      const r = moveOrder(o.id, 'closed', actor || 'system', 'closed after restart');
       if (r.ok) closed.push(o.id);
     }
     res.json({ ok: true, closed });
