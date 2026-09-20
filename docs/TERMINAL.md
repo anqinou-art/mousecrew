@@ -94,7 +94,8 @@ interrupt work, deliberately: one interruption is preferable to a continuously b
 never receiving anything. The attempt is recorded before text is sent, so a failure or
 restart cannot turn the two-minute `delivery.forcedGraceMs` window into a retry loop. Once
 that grace period ends, the message expires. A message with no window, or one that remained
-queued while the window was idle, expires without a forced attempt. Set
+queued while the window was idle for reasons other than the input-box gate, expires without
+a forced attempt. A persisted input-box hold earns the same one attempt as a busy window. Set
 `delivery.forceOnExpiry` to `false` to expire every message at the original cutoff.
 Forced delivery still checks the input box, but waits there for at most
 `delivery.forcedDraftHoldMs` (default 90 seconds) before deliberately interrupting.

@@ -130,12 +130,39 @@ test('delivery batching config has defaults and refuses invalid types at startup
     [{ forcedGraceMs: 0 }, /delivery\.forcedGraceMs must be a positive integer/],
     [{ draftQuietMs: 0 }, /delivery\.draftQuietMs must be a positive integer/],
     [{ forcedDraftHoldMs: -1 }, /delivery\.forcedDraftHoldMs must be a non-negative integer/],
-    [{ forcedDraftHoldMs: 120000 }, /delivery\.forcedDraftHoldMs must be shorter than delivery\.forcedGraceMs/],
   ]) {
     const configFile = path.join(dir, `config-${Object.keys(delivery)[0]}.json`);
     fs.writeFileSync(configFile, JSON.stringify({ delivery }));
     assert.throws(() => load({ configFile, agentsFile, root: dir }), expected);
   }
+});
+
+test('draft hold timing only constrains rosters that enable input-box detection', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-draft-config-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const configFile = path.join(dir, 'config.json');
+  const agentsFile = path.join(dir, 'agents.json');
+  fs.writeFileSync(configFile, JSON.stringify({ delivery: { forcedGraceMs: 60000 } }));
+  fs.writeFileSync(agentsFile, JSON.stringify({
+    agents: [{ id: 'worker', transport: 'terminal', terminal: { adapter: 'fake' } }],
+  }));
+
+  assert.equal(load({ configFile, agentsFile, root: dir }).config.delivery.forcedGraceMs, 60000,
+    'an existing short grace remains valid while the new gate is disabled');
+
+  fs.writeFileSync(agentsFile, JSON.stringify({
+    agents: [{
+      id: 'worker', transport: 'terminal',
+      terminal: { adapter: 'fake', inputBox: 'claude-code' },
+    }],
+  }));
+  assert.throws(
+    () => load({ configFile, agentsFile, root: dir }),
+    /delivery\.forcedDraftHoldMs must be shorter than delivery\.forcedGraceMs when terminal\.inputBox is enabled/,
+  );
+
+  fs.writeFileSync(configFile, JSON.stringify({ delivery: { forcedGraceMs: 120000 } }));
+  assert.equal(load({ configFile, agentsFile, root: dir }).config.delivery.forcedDraftHoldMs, 90000);
 });
 
 test('an empty roster is an error, not an empty crew', () => {

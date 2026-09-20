@@ -267,10 +267,6 @@ function load({ configFile, agentsFile, root } = {}) {
   if (!Number.isInteger(cfg.delivery.forcedDraftHoldMs) || cfg.delivery.forcedDraftHoldMs < 0) {
     throw new Error('delivery.forcedDraftHoldMs must be a non-negative integer');
   }
-  if (cfg.delivery.forcedDraftHoldMs >= cfg.delivery.forcedGraceMs) {
-    throw new Error('delivery.forcedDraftHoldMs must be shorter than delivery.forcedGraceMs');
-  }
-
   const projectConfig = validateProjects(cfg.projects);
   if (projectConfig.errors.length) {
     throw new Error('project config is invalid:\n  - ' + projectConfig.errors.join('\n  - '));
@@ -286,7 +282,15 @@ function load({ configFile, agentsFile, root } = {}) {
     throw new Error('agent roster is invalid:\n  - ' + errors.join('\n  - '));
   }
 
-  return { config: cfg, agents: roster.map(normalizeAgent) };
+  const agents = roster.map(normalizeAgent);
+  const inputBoxEnabled = agents.some((agent) => (
+    agent.transport === 'terminal' && agent.terminal && agent.terminal.inputBox
+  ));
+  if (inputBoxEnabled && cfg.delivery.forcedDraftHoldMs >= cfg.delivery.forcedGraceMs) {
+    throw new Error('delivery.forcedDraftHoldMs must be shorter than delivery.forcedGraceMs when terminal.inputBox is enabled');
+  }
+
+  return { config: cfg, agents };
 }
 
 module.exports = { load, validateAgents, validateProjects, normalizeAgent, expandTilde, stripComments, DEFAULTS };

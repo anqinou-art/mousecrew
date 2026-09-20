@@ -406,11 +406,11 @@ Stated plainly, because you will meet them.
 
 - **One sidecar drives one multiplexer.** A roster mixing adapters needs a second sidecar;
   the process refuses to start rather than silently ignoring half the crew.
-- **A terminal agent that is always busy misses messages.** Injection only happens when the
-  window is idle, and a window doing continuous work is never idle; those messages expire
-  after ten minutes. Group history still has them, and undelivered DMs come back with a
-  receipt — but "your message was dropped because you were working" is not solved. Headless
-  agents queue instead and are unaffected.
+- **A terminal agent can still miss a message after its one forced attempt.** A message held
+  by a busy window gets one forced delivery after ten minutes, then expires if that attempt
+  fails. Messages with no matching window expire without an attempt. Group history still has
+  them, and undelivered DMs come back with a receipt. Headless agents queue instead and are
+  unaffected.
 - **Transitions record the actor but do not authenticate them.** Anyone with the token can
   act as anyone. Repo ownership and the merge gate *are* enforced — but on a *claimed*
   identity, so the gate stops an honest mistake, not a caller who names someone else.
