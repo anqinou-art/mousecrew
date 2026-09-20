@@ -19,7 +19,7 @@ answer is arrived at rather than produced — that is worth the fragility.
 |---|---|---|
 | Available with your laptop closed | yes | no |
 | Interrupt mid-task | no | yes |
-| Message never dropped | queued | expires after 10 minutes |
+| Busy delivery | queued | one forced attempt after 10 minutes, then expires |
 | Lifecycle managed by | mousecrew | you |
 
 ## Setting one up
