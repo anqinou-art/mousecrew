@@ -82,7 +82,7 @@ HTTP 409
 The merge gate is checked the same way:
 
 ```
-$ mousecrew audit-pass WO-001 -s backend
+$ mousecrew audit-pass WO-001 -s backend --rev 1
 HTTP 403
 { "error": "only \"auditor\" may merge (single gate); \"backend\" may not" }
 ```

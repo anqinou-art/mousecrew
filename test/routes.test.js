@@ -4,8 +4,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const http = require('http');
+const Database = require('better-sqlite3');
 const { build } = require('../src/server');
 const { normalizeAgent } = require('../src/config');
+const { open } = require('../src/db');
 
 // Route-level tests.
 //
@@ -442,6 +444,8 @@ test('resume returns review work to review and delivers to the remote merge gate
   const resumed = await call('POST', `/api/orders/${id}/resume`, { actor: 'human' });
   assert.equal(resumed.status, 200);
   assert.equal(resumed.body.status, 'auditing');
+  assert.equal(resumed.body.frozen, 1);
+  assert.equal(resumed.body.audit_revision, 1);
   assert.equal(delivered, 1);
 });
 
@@ -478,6 +482,262 @@ test('the resume card and timeline both name paused as the source', async (t) =>
 
   const tl = (await call('GET', `/api/orders/${id}`)).body.timeline;
   assert.equal(tl[tl.length - 1].from, card.from_status, 'the card and the timeline agree');
+});
+
+// ---------- review snapshots ----------
+
+async function submittedOrder(call, ctx, suffix) {
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server', title: `review ${suffix}` });
+  place(ctx, id, 'submitted');
+  ctx.store.order.setCommitFields.run(`commit-${suffix}`, `branch-${suffix}`, JSON.stringify([`${suffix}.js`]), id);
+  return id;
+}
+
+test('accept and generic transition each freeze exactly one immutable review revision', async (t) => {
+  const { call, ctx } = await boot(t);
+  const acceptedId = await submittedOrder(call, ctx, 'accept');
+  const accepted = await call('POST', `/api/orders/${acceptedId}/accept`, { actor: 'auditor' });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+  assert.equal(accepted.body.order.frozen, 1);
+  assert.equal(accepted.body.order.audit_revision, 1);
+  assert.equal(ctx.store.orderRevision.byOrder.all(acceptedId).length, 1);
+
+  const transitionedId = await submittedOrder(call, ctx, 'transition');
+  const transitioned = await call('POST', `/api/orders/${transitionedId}/transition`, {
+    to_status: 'auditing', actor: 'auditor', comment: 'taking review',
+  });
+  assert.equal(transitioned.status, 200, JSON.stringify(transitioned.body));
+  assert.equal(transitioned.body.frozen, 1);
+  assert.equal(transitioned.body.audit_revision, 1);
+  assert.equal(ctx.store.orderRevision.byOrder.all(transitionedId).length, 1);
+});
+
+test('a late decision cannot release a newer review revision', async (t) => {
+  const { call, ctx } = await boot(t);
+  const id = await submittedOrder(call, ctx, 'one');
+  await call('POST', `/api/orders/${id}/accept`, { actor: 'auditor' });
+  const rejected = await call('POST', `/api/orders/${id}/transition`, {
+    to_status: 'rejected', actor: 'auditor', comment: 'changes needed', audit_revision: 1,
+  });
+  assert.equal(rejected.status, 200, JSON.stringify(rejected.body));
+  assert.equal(ctx.store.order.getById.get(id).frozen, 0);
+  assert.equal(ctx.store.order.getById.get(id).audit_revision, 1);
+
+  await call('POST', `/api/orders/${id}/accept`, { actor: 'backend' });
+  await call('POST', `/api/orders/${id}/transition`, {
+    to_status: 'submitted', actor: 'backend', commit_hash: 'commit-two', git_branch: 'branch-two',
+  });
+  await call('POST', `/api/orders/${id}/accept`, { actor: 'auditor' });
+  assert.equal(ctx.store.order.getById.get(id).audit_revision, 2);
+
+  const late = await call('POST', `/api/orders/${id}/transition`, {
+    to_status: 'pending_restart', actor: 'auditor', audit_revision: 1,
+  });
+  assert.equal(late.status, 409);
+  assert.match(late.body.error, /reviewed revision 1.*current revision is 2/);
+  const invented = await call('POST', `/api/orders/${id}/transition`, {
+    to_status: 'rejected', actor: 'auditor', audit_revision: 99,
+  });
+  assert.equal(invented.status, 409);
+  assert.equal(ctx.store.order.getById.get(id).audit_revision, 2, 'a claimed revision is comparison-only');
+  assert.equal(ctx.store.order.getById.get(id).status, 'auditing');
+});
+
+test('frozen delivery fields are rejected before verification or any partial write', async (t) => {
+  const { call, ctx } = await boot(t);
+  const id = await submittedOrder(call, ctx, 'frozen');
+  await call('POST', `/api/orders/${id}/accept`, { actor: 'auditor' });
+  const before = ctx.store.order.getById.get(id);
+  const blocked = await call('POST', `/api/orders/${id}/transition`, {
+    to_status: 'pending_restart', actor: 'auditor', audit_revision: 1,
+    commit_hash: 'different', git_branch: 'different-branch',
+  });
+  assert.equal(blocked.status, 409);
+  assert.match(blocked.body.error, /frozen at revision 1/);
+  const after = ctx.store.order.getById.get(id);
+  assert.deepEqual(
+    [after.commit_hash, after.git_branch, after.files_changed, after.status],
+    [before.commit_hash, before.git_branch, before.files_changed, 'auditing'],
+  );
+});
+
+test('assignee and merge gate can explicitly unfreeze, but rejected requests cannot', async (t) => {
+  const { call, ctx } = await boot(t, REMOTE_GATE_CREW);
+  const notices = [];
+  ctx.manager.remotes.set('auditor', {
+    online: true,
+    sendFn: async (text) => { notices.push(text); return { text: 'noted' }; },
+  });
+  const first = await submittedOrder(call, ctx, 'assignee');
+  await call('POST', `/api/orders/${first}/accept`, { actor: 'auditor' });
+  assert.equal((await call('POST', `/api/orders/${first}/unfreeze`, { actor: 'backend' })).status, 400);
+  assert.equal((await call('POST', `/api/orders/${first}/unfreeze`, { actor: 'stranger', reason: 'x' })).status, 403);
+  const beforeBypass = ctx.store.order.getById.get(first);
+  const wrongActor = await call('POST', `/api/orders/${first}/transition`, {
+    to_status: 'in_progress', actor: 'stranger', comment: 'replace delivery',
+  });
+  const missingReason = await call('POST', `/api/orders/${first}/transition`, {
+    to_status: 'in_progress', actor: 'backend',
+  });
+  assert.equal(wrongActor.status, 409);
+  assert.equal(missingReason.status, 409);
+  assert.match(wrongActor.body.error, /unfreeze endpoint/);
+  const afterBypass = ctx.store.order.getById.get(first);
+  assert.deepEqual(
+    [afterBypass.status, afterBypass.frozen, afterBypass.audit_revision,
+      afterBypass.commit_hash, afterBypass.git_branch, afterBypass.files_changed],
+    [beforeBypass.status, beforeBypass.frozen, beforeBypass.audit_revision,
+      beforeBypass.commit_hash, beforeBypass.git_branch, beforeBypass.files_changed],
+  );
+  assert.equal(notices.length, 0);
+  const byAssignee = await call('POST', `/api/orders/${first}/unfreeze`, { actor: 'backend', reason: 'change delivery' });
+  assert.equal(byAssignee.status, 200, JSON.stringify(byAssignee.body));
+  assert.equal(byAssignee.body.order.status, 'in_progress');
+  assert.equal(byAssignee.body.order.frozen, 0);
+  assert.equal(byAssignee.body.order.audit_revision, 1);
+  assert.equal(notices.length, 1, 'the invalidation notice must reach the gate after ownership changed');
+  assert.match(notices[0], /revision 1 was invalidated: change delivery/);
+
+  const second = await submittedOrder(call, ctx, 'gate');
+  await call('POST', `/api/orders/${second}/accept`, { actor: 'auditor' });
+  const byGate = await call('POST', `/api/orders/${second}/unfreeze`, { actor: 'auditor', reason: 'withdraw review' });
+  assert.equal(byGate.status, 200, JSON.stringify(byGate.body));
+  assert.equal(byGate.body.order.audit_revision, 1);
+});
+
+test('a migrated review without a snapshot still withdraws through the guarded endpoint', async (t) => {
+  const { call, ctx } = await boot(t, REMOTE_GATE_CREW);
+  const notices = [];
+  ctx.manager.remotes.set('auditor', {
+    online: true,
+    sendFn: async (text) => { notices.push(text); return { text: 'noted' }; },
+  });
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  place(ctx, id, 'auditing');
+
+  const generic = await call('POST', `/api/orders/${id}/transition`, {
+    to_status: 'in_progress', actor: 'backend', comment: 'repair legacy review',
+  });
+  assert.equal(generic.status, 409);
+  const withdrawn = await call('POST', `/api/orders/${id}/unfreeze`, {
+    actor: 'backend', reason: 'repair legacy review',
+  });
+  assert.equal(withdrawn.status, 200, JSON.stringify(withdrawn.body));
+  assert.equal(withdrawn.body.order.status, 'in_progress');
+  assert.equal(withdrawn.body.unfrozen_revision, 0);
+  assert.match(notices[0], /without a frozen revision was withdrawn: repair legacy review/);
+});
+
+test('review decisions require a revision, while pause and cancellation do not', async (t) => {
+  const { call, ctx } = await boot(t);
+  const decision = await submittedOrder(call, ctx, 'decision');
+  await call('POST', `/api/orders/${decision}/accept`, { actor: 'auditor' });
+  const missing = await call('POST', `/api/orders/${decision}/transition`, {
+    to_status: 'pending_restart', actor: 'auditor', comment: 'done',
+  });
+  assert.equal(missing.status, 400);
+  assert.match(missing.body.error, /audit_revision is required/);
+  assert.equal(ctx.store.order.getById.get(decision).status, 'auditing');
+
+  const paused = await call('POST', `/api/orders/${decision}/pause`, {
+    actor: 'auditor', reason: 'waiting',
+  });
+  assert.equal(paused.status, 200, JSON.stringify(paused.body));
+  assert.equal(paused.body.frozen, 0);
+  assert.equal(paused.body.audit_revision, 1);
+
+  const cancelled = await submittedOrder(call, ctx, 'cancelled');
+  await call('POST', `/api/orders/${cancelled}/accept`, { actor: 'auditor' });
+  const closed = await call('POST', `/api/orders/${cancelled}/transition`, {
+    to_status: 'closed', actor: 'auditor', comment: 'obsolete', cancelled: true,
+  });
+  assert.equal(closed.status, 200, JSON.stringify(closed.body));
+  assert.equal(closed.body.frozen, 0);
+  assert.equal(closed.body.audit_revision, 1);
+});
+
+test('review movement and its freeze flag roll back together when snapshot writes fail', async (t) => {
+  const { call, ctx } = await boot(t);
+  const entering = await submittedOrder(call, ctx, 'atomic-freeze');
+  const beforeEntering = ctx.store.order.getById.get(entering);
+  ctx.store.db.exec(`CREATE TRIGGER reject_snapshot BEFORE INSERT ON order_revisions
+    WHEN NEW.order_id = '${entering}' BEGIN SELECT RAISE(ABORT, 'snapshot failed'); END`);
+  const failedFreeze = await call('POST', `/api/orders/${entering}/transition`, {
+    to_status: 'auditing', actor: 'auditor', commit_hash: 'changed', git_branch: 'changed',
+  });
+  assert.equal(failedFreeze.status, 500);
+  assert.deepEqual(
+    (({ status, frozen, audit_revision, commit_hash, git_branch, files_changed }) => ({
+      status, frozen, audit_revision, commit_hash, git_branch, files_changed,
+    }))(
+      ctx.store.order.getById.get(entering),
+    ),
+    {
+      status: 'submitted', frozen: 0, audit_revision: 0,
+      commit_hash: beforeEntering.commit_hash,
+      git_branch: beforeEntering.git_branch,
+      files_changed: beforeEntering.files_changed,
+    },
+  );
+
+  const leaving = await submittedOrder(call, ctx, 'atomic-unfreeze');
+  await call('POST', `/api/orders/${leaving}/accept`, { actor: 'auditor' });
+  ctx.store.db.exec(`CREATE TRIGGER reject_unfreeze BEFORE UPDATE OF frozen ON work_orders
+    WHEN OLD.id = '${leaving}' AND NEW.frozen = 0
+    BEGIN SELECT RAISE(ABORT, 'unfreeze failed'); END`);
+  const failedUnfreeze = await call('POST', `/api/orders/${leaving}/unfreeze`, {
+    actor: 'backend', reason: 'change delivery',
+  });
+  assert.equal(failedUnfreeze.status, 500);
+  assert.deepEqual(
+    (({ status, frozen, audit_revision }) => ({ status, frozen, audit_revision }))(
+      ctx.store.order.getById.get(leaving),
+    ),
+    { status: 'auditing', frozen: 1, audit_revision: 1 },
+  );
+});
+
+test('review snapshots have no update surface or automatic thaw timer', () => {
+  const dbSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'db.js'), 'utf8');
+  const freezeSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'lib', 'audit-freeze.js'), 'utf8');
+  const memory = open(':memory:');
+  assert.equal('update' in memory.orderRevision, false);
+  memory.close();
+  assert.doesNotMatch(dbSource, /UPDATE\s+order_revisions/i);
+  assert.doesNotMatch(freezeSource, /setTimeout|setInterval|TTL|expire/i);
+});
+
+test('opening an existing database adds review columns and the snapshot table', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-migrate-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dbPath = path.join(dir, 'old.db');
+  open(dbPath).close();
+
+  const old = new Database(dbPath);
+  old.exec(`
+    DROP TABLE order_revisions;
+    ALTER TABLE work_orders DROP COLUMN frozen;
+    ALTER TABLE work_orders DROP COLUMN audit_revision;
+  `);
+  old.close();
+
+  const upgraded = open(dbPath);
+  t.after(() => upgraded.close());
+  const columns = upgraded.db.prepare('PRAGMA table_info(work_orders)').all().map((c) => c.name);
+  assert.ok(columns.includes('audit_revision'));
+  assert.ok(columns.includes('frozen'));
+  assert.ok(upgraded.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_revisions'").get());
+});
+
+test('order details expose the frozen revision and its immutable snapshot', async (t) => {
+  const { call, ctx } = await boot(t);
+  const id = await submittedOrder(call, ctx, 'visible');
+  await call('POST', `/api/orders/${id}/accept`, { actor: 'auditor' });
+  const shown = await call('GET', `/api/orders/${id}`);
+  assert.equal(shown.body.frozen, 1);
+  assert.equal(shown.body.audit_revision, 1);
+  assert.equal(shown.body.revisions.length, 1);
+  assert.equal(shown.body.revisions[0].commit_hash, 'commit-visible');
 });
 
 test('a group message reaches the group and names its author canonically', async (t) => {

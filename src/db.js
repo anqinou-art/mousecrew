@@ -49,6 +49,8 @@ function open(dbPath) {
       blocked_by TEXT,
       pause_reason TEXT,
       needs_restart INTEGER DEFAULT 1,
+      audit_revision INTEGER NOT NULL DEFAULT 0,
+      frozen INTEGER NOT NULL DEFAULT 0,
       timeline TEXT,
       created_by TEXT,
       created_at DATETIME DEFAULT (datetime('now')),
@@ -63,6 +65,17 @@ function open(dbPath) {
       action TEXT NOT NULL,
       detail TEXT,
       ts DATETIME DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS order_revisions (
+      order_id TEXT NOT NULL REFERENCES work_orders(id),
+      audit_revision INTEGER NOT NULL,
+      git_branch TEXT,
+      commit_hash TEXT,
+      files_changed TEXT,
+      frozen_by TEXT NOT NULL,
+      frozen_at DATETIME DEFAULT (datetime('now')),
+      PRIMARY KEY (order_id, audit_revision)
     );
 
     -- A thread is a piece of work that can be put down and picked back up. Orders are for
@@ -147,6 +160,8 @@ function open(dbPath) {
   for (const sql of [
     'ALTER TABLE work_orders ADD COLUMN repo TEXT',
     'ALTER TABLE work_orders ADD COLUMN git_branch TEXT',
+    'ALTER TABLE work_orders ADD COLUMN audit_revision INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE work_orders ADD COLUMN frozen INTEGER NOT NULL DEFAULT 0',
   ]) {
     try { db.exec(sql); } catch { /* already there */ }
   }
@@ -168,6 +183,8 @@ function open(dbPath) {
     setAssignee: db.prepare('UPDATE work_orders SET assignee = ? WHERE id = ?'),
     setCommitFields: db.prepare('UPDATE work_orders SET commit_hash = ?, git_branch = ?, files_changed = ? WHERE id = ?'),
     setBranch: db.prepare('UPDATE work_orders SET git_branch = ? WHERE id = ?'),
+    freeze: db.prepare('UPDATE work_orders SET audit_revision = audit_revision + 1, frozen = 1 WHERE id = ?'),
+    setFrozen: db.prepare('UPDATE work_orders SET frozen = ? WHERE id = ?'),
     // Scheduler notes are history, not work-order movement. Touching updated_at here would
     // make the scheduler read its own note as evidence that the assignee acted.
     appendTimelineNote: db.prepare('UPDATE work_orders SET timeline = ? WHERE id = ?'),
@@ -177,6 +194,15 @@ function open(dbPath) {
   const log = {
     insert: db.prepare('INSERT INTO agent_logs (work_order_id, agent_name, action, detail) VALUES (?, ?, ?, ?)'),
     byOrder: db.prepare('SELECT * FROM agent_logs WHERE work_order_id = ? ORDER BY ts ASC'),
+  };
+
+  // Snapshots are append-only by construction: there is intentionally no UPDATE statement.
+  const orderRevision = {
+    insert: db.prepare(`INSERT INTO order_revisions
+      (order_id, audit_revision, git_branch, commit_hash, files_changed, frozen_by)
+      VALUES (?, ?, ?, ?, ?, ?)`),
+    get: db.prepare('SELECT * FROM order_revisions WHERE order_id = ? AND audit_revision = ?'),
+    byOrder: db.prepare('SELECT * FROM order_revisions WHERE order_id = ? ORDER BY audit_revision'),
   };
 
   const project = {
@@ -223,7 +249,7 @@ function open(dbPath) {
     insert: db.prepare('INSERT INTO thread_log (thread_name, who, what) VALUES (?, ?, ?)'),
   };
 
-  return { db, msg, order, log, project, thread, threadPlan, threadLog, close: () => db.close() };
+  return { db, msg, order, orderRevision, log, project, thread, threadPlan, threadLog, close: () => db.close() };
 }
 
 module.exports = { open };

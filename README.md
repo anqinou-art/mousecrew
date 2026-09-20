@@ -217,9 +217,10 @@ All endpoints require `Authorization: Bearer <token>`. There is no grace mode.
 | `POST /api/group/chat` | a human speaks |
 | `POST /api/group/post` | an agent replies |
 | `GET/POST /api/orders` | list / create |
-| `GET /api/orders/:id` | one order with timeline and logs |
-| `POST /api/orders/:id/transition` | move it; optional `commit_hash`, `git_branch` |
+| `GET /api/orders/:id` | one order with timeline, logs, and immutable review snapshots |
+| `POST /api/orders/:id/transition` | move it; optional `commit_hash`, `git_branch`; review decisions include `audit_revision` |
 | `POST /api/orders/:id/pause` `/resume` `/assign` | blocking and assignment |
+| `POST /api/orders/:id/unfreeze` | withdraw a frozen review version and return it for changes |
 | `POST /api/orders/:id/logs` | append an agent log line to the order |
 | `POST /api/orders/restart-done` | close everything that was waiting on a restart |
 | `GET/POST /api/threads` | list / open a thread |
@@ -326,6 +327,12 @@ This is what makes the review gate checkable rather than assumed. The worst bug 
 codebase's own review was an order reaching a terminal state with **no audit entry in its
 timeline** — the gate was watching one door and the order walked through another. That is a
 question you can only ask if every move left a line behind.
+
+Entering review also freezes the delivery fields into an immutable, numbered snapshot. A pass
+or rejection must name that revision (`mousecrew audit-pass WO-001 --rev 2`), so a late decision
+for revision 1 cannot release revision 2. The assignee, merge gate, or order owner may explicitly
+unfreeze with a reason; there is no timeout. This protects the delivery recorded on the order —
+it cannot stop someone from force-pushing the reviewed Git branch, which remains a repository rule.
 
 **Agent logs** — free-form notes attached to an order, one row each
 (`agent_name`, `action`, `detail`, `ts`). The state machine never writes here; agents and
