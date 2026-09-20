@@ -109,10 +109,14 @@ test('delivery batching config has defaults and refuses invalid types at startup
     maxPending: 200,
     batchGroup: true,
     inlineLimit: 600,
+    forceOnExpiry: true,
+    forcedGraceMs: 120000,
   });
   for (const [delivery, expected] of [
     [{ batchGroup: 'yes' }, /delivery\.batchGroup must be a boolean/],
     [{ inlineLimit: 0 }, /delivery\.inlineLimit must be a positive integer/],
+    [{ forceOnExpiry: 'yes' }, /delivery\.forceOnExpiry must be a boolean/],
+    [{ forcedGraceMs: 0 }, /delivery\.forcedGraceMs must be a positive integer/],
   ]) {
     const configFile = path.join(dir, `config-${Object.keys(delivery)[0]}.json`);
     fs.writeFileSync(configFile, JSON.stringify({ delivery }));

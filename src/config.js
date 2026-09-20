@@ -15,7 +15,10 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { normalizeVerifyRepos, normalizeDeployTrees } = require('./lib/commit-verify');
-const { DEFAULT_BATCH_GROUP, DEFAULT_INLINE_LIMIT } = require('./lib/sidecar-core');
+const {
+  DEFAULT_BATCH_GROUP, DEFAULT_INLINE_LIMIT,
+  DEFAULT_FORCE_ON_EXPIRY, DEFAULT_FORCED_GRACE_MS,
+} = require('./lib/sidecar-core');
 
 function expandTilde(p) {
   if (typeof p !== 'string') return p;
@@ -67,6 +70,8 @@ const DEFAULTS = {
     maxPending: 200,
     batchGroup: DEFAULT_BATCH_GROUP,
     inlineLimit: DEFAULT_INLINE_LIMIT,
+    forceOnExpiry: DEFAULT_FORCE_ON_EXPIRY,
+    forcedGraceMs: DEFAULT_FORCED_GRACE_MS,
   },
   contextWatch: { enabled: true, thresholdTurns: 10, noHandoff: [], handoffDir: './data/handoff' },
   notify: { type: 'none', url: '' },
@@ -240,6 +245,12 @@ function load({ configFile, agentsFile, root } = {}) {
   }
   if (!Number.isInteger(cfg.delivery.inlineLimit) || cfg.delivery.inlineLimit < 1) {
     throw new Error('delivery.inlineLimit must be a positive integer');
+  }
+  if (typeof cfg.delivery.forceOnExpiry !== 'boolean') {
+    throw new Error('delivery.forceOnExpiry must be a boolean');
+  }
+  if (!Number.isInteger(cfg.delivery.forcedGraceMs) || cfg.delivery.forcedGraceMs < 1) {
+    throw new Error('delivery.forcedGraceMs must be a positive integer');
   }
 
   const projectConfig = validateProjects(cfg.projects);

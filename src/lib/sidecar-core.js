@@ -14,6 +14,8 @@ const crypto = require('crypto');
 
 const DEFAULT_BATCH_GROUP = true;
 const DEFAULT_INLINE_LIMIT = 600;
+const DEFAULT_FORCE_ON_EXPIRY = true;
+const DEFAULT_FORCED_GRACE_MS = 2 * 60 * 1000;
 
 // The separator is a NUL byte, written as an escape on purpose: a literal one in the
 // source makes git treat this whole file as binary, and `git diff` then answers
@@ -98,17 +100,18 @@ function isBusy(screen, pattern) {
  * A broken timestamp is kept rather than dropped: "I cannot tell how old this is" must not
  * become "therefore throw it away". The size cap catches those.
  */
-function filterFresh(pending, now = Date.now(), ttlMs = 10 * 60 * 1000) {
+function filterFresh(pending, now = Date.now(), ttlMs = 10 * 60 * 1000, forcedGraceMs = DEFAULT_FORCED_GRACE_MS) {
   return pending.filter((item) => {
-    const t = Date.parse(item && item.queuedAt);
+    const forced = Boolean(item && item.forcedAt);
+    const t = Date.parse(forced ? item.forcedAt : item && item.queuedAt);
     if (!Number.isFinite(t)) return true;
-    return now - t < ttlMs;
+    return now - t < (forced ? forcedGraceMs : ttlMs);
   });
 }
 
 /** Items that filterFresh would drop — needed because expiry has to be reported, not just done. */
-function selectExpired(pending, now = Date.now(), ttlMs = 10 * 60 * 1000) {
-  const fresh = new Set(filterFresh(pending, now, ttlMs));
+function selectExpired(pending, now = Date.now(), ttlMs = 10 * 60 * 1000, forcedGraceMs = DEFAULT_FORCED_GRACE_MS) {
+  const fresh = new Set(filterFresh(pending, now, ttlMs, forcedGraceMs));
   return pending.filter((item) => !fresh.has(item));
 }
 
@@ -140,12 +143,14 @@ function nextDeliverableBatch(pending, agent, batchGroup = DEFAULT_BATCH_GROUP) 
   if (!first || !batchGroup || first.kind !== 'group') return first ? [first] : [];
 
   const batch = [];
+  const forced = Boolean(first.forcedAt);
   let started = false;
   for (const item of rows) {
     if (!item || item.agent !== agent) continue;
     if (!started) started = item === first;
     if (!started) continue;
     if (item.kind !== 'group') break;
+    if (Boolean(item.forcedAt) !== forced) break;
     batch.push(item);
   }
   return batch;
@@ -180,6 +185,45 @@ function batchEnvelope({ items, agent, cli = 'mousecrew', bodyFile = null, inlin
   return `${heading}${rendered}\n  — reply with: ${cli} ${command} --as ${agent} "..."`;
 }
 
+function mergeDmBodies(items) {
+  const batch = Array.isArray(items) ? items : [];
+  return `[${batch.length} direct messages delivered together after waiting]\n${batchBody(batch)}`;
+}
+
+function markForcedDeliveries(items, now = Date.now()) {
+  const candidates = (Array.isArray(items) ? items : []).filter((item) => item && !item.forcedAt);
+  const forcedAt = new Date(now).toISOString();
+  const forced = [];
+  const absorbed = [];
+  const byAgent = new Map();
+  for (const item of candidates) {
+    if (!byAgent.has(item.agent)) byAgent.set(item.agent, []);
+    byAgent.get(item.agent).push(item);
+  }
+  for (const group of byAgent.values()) {
+    const dms = group.filter((item) => item.kind === 'dm');
+    if (dms.length) {
+      const head = dms[0];
+      head.mergedFrom = dms.map((item) => ({ dmId: item.dmId }));
+      if (dms.length > 1) head.content = mergeDmBodies(dms);
+      head.forcedAt = forcedAt;
+      forced.push(head);
+      absorbed.push(...dms.slice(1));
+    }
+    for (const item of group.filter((entry) => entry.kind !== 'dm')) {
+      item.forcedAt = forcedAt;
+      forced.push(item);
+    }
+  }
+  return { forced, absorbed };
+}
+
+function planDelivery(item, busy) {
+  if (item.forcedTriedAt) return 'wait_forced_expiry';
+  if (item.forcedAt) return 'inject_forced';
+  return busy ? 'wait_busy' : 'inject';
+}
+
 /**
  * Pick the window for an identity. Resolved fresh on every delivery, never cached: window
  * references are renumbered when sessions are restored, and a cached ref points at whatever
@@ -198,8 +242,10 @@ function resolveWindow(windows, identityName) {
 
 module.exports = {
   DEFAULT_BATCH_GROUP, DEFAULT_INLINE_LIMIT,
+  DEFAULT_FORCE_ON_EXPIRY, DEFAULT_FORCED_GRACE_MS,
   fingerprint, normalizeMessage, messageKey,
   mentionTargets, isBusy,
   filterFresh, selectExpired, capPending,
-  envelope, nextDeliverableBatch, batchBody, batchEnvelope, resolveWindow,
+  envelope, nextDeliverableBatch, batchBody, batchEnvelope,
+  mergeDmBodies, markForcedDeliveries, planDelivery, resolveWindow,
 };

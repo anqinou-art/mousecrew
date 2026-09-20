@@ -168,13 +168,19 @@ is decided, why messages expire, and what an adapter is and is not responsible f
 |---|---|---|
 | Available when your laptop is closed | yes | no |
 | Can you interrupt mid-task | no | yes |
-| Message never dropped | queued | expires after 10 minutes |
+| Message never dropped | queued | forced once after 10 minutes, then expires |
 | Lifecycle managed by | mousecrew | you |
 
 When a terminal window becomes idle, consecutive group messages for that crew member are
 combined into one injection and one response cycle. A direct message always remains a
 separate delivery so its receipt stays unambiguous. Set `delivery.batchGroup` to `false` to
 return to one message per pass.
+
+By default, a message held back by a busy window for ten minutes gets one forced delivery
+attempt. This intentionally interrupts the agent once rather than let a continuously busy
+window miss every message. A failed forced attempt is not retried; it expires after the
+two-minute `delivery.forcedGraceMs` window. Set `delivery.forceOnExpiry` to `false` for the
+previous expire-without-interrupting behaviour.
 
 Message body text longer than `delivery.inlineLimit` (600 characters by default) is written
 to a private `0600` file beside the sidecar state. The terminal receives the first part, the

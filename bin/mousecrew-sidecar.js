@@ -85,6 +85,8 @@ const sidecar = new Sidecar({
   maxPending: config.delivery.maxPending,
   batchGroup: config.delivery.batchGroup,
   inlineLimit: config.delivery.inlineLimit,
+  forceOnExpiry: config.delivery.forceOnExpiry,
+  forcedGraceMs: config.delivery.forcedGraceMs,
 });
 
 // Log every structured event. These are the same events the tests assert against, so what

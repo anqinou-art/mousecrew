@@ -86,6 +86,15 @@ test('an unreadable timestamp is kept, not discarded', () => {
   assert.equal(core.filterFresh(pending, NOW).length, 2);
 });
 
+test('forced items use their own grace clock and broken timestamps remain exempt', () => {
+  const pending = [
+    { agent: 'fresh', queuedAt: at(20).queuedAt, forcedAt: new Date(NOW - 60_000).toISOString() },
+    { agent: 'expired', queuedAt: at(20).queuedAt, forcedAt: new Date(NOW - 3 * 60_000).toISOString() },
+    { agent: 'unknown', queuedAt: at(20).queuedAt, forcedAt: 'not-a-date' },
+  ];
+  assert.deepEqual(core.filterFresh(pending, NOW).map((item) => item.agent), ['fresh', 'unknown']);
+});
+
 test('the queue cap drops the oldest and says which', () => {
   const pending = [1, 2, 3, 4, 5].map((n) => ({ agent: `a${n}` }));
   const { kept, dropped } = core.capPending(pending, 3);
@@ -120,6 +129,12 @@ test('delivery batches consecutive group messages but never folds in a direct me
   assert.deepEqual(core.nextDeliverableBatch(rows.slice(3), 'architect').map((item) => item.id), ['dm']);
   assert.deepEqual(core.nextDeliverableBatch(rows.slice(4), 'architect').map((item) => item.id), ['g3']);
   assert.deepEqual(core.nextDeliverableBatch(rows, 'architect', false).map((item) => item.id), ['g1']);
+
+  const forced = [
+    { id: 'old', agent: 'architect', kind: 'group', forcedAt: 'T' },
+    { id: 'new', agent: 'architect', kind: 'group' },
+  ];
+  assert.deepEqual(core.nextDeliverableBatch(forced, 'architect').map((item) => item.id), ['old']);
 });
 
 test('one-item batch envelopes stay byte-for-byte compatible and group batches reply once', () => {
@@ -136,6 +151,25 @@ test('one-item batch envelopes stay byte-for-byte compatible and group batches r
   assert.match(text, /2 messages delivered together/);
   assert.ok(text.indexOf('human · T1') < text.indexOf('builder · T2'));
   assert.equal((text.match(/reply with:/g) || []).length, 1);
+});
+
+test('forced delivery planning has four outcomes and merged direct messages retain every receipt', () => {
+  assert.equal(core.planDelivery({}, false), 'inject');
+  assert.equal(core.planDelivery({}, true), 'wait_busy');
+  assert.equal(core.planDelivery({ forcedAt: 'T' }, true), 'inject_forced');
+  assert.equal(core.planDelivery({ forcedAt: 'T', forcedTriedAt: 'T2' }, false), 'wait_forced_expiry');
+
+  const items = [
+    { agent: 'architect', kind: 'dm', sender: 'one', content: 'first', dmId: 'd1', queuedAt: 'T1' },
+    { agent: 'architect', kind: 'dm', sender: 'two', content: 'second', dmId: 'd2', queuedAt: 'T2' },
+    { agent: 'architect', kind: 'group', sender: 'three', content: 'third', queuedAt: 'T3' },
+  ];
+  const marked = core.markForcedDeliveries(items, 1_000_000);
+  assert.equal(marked.forced.length, 2, 'one direct carrier and one group item');
+  assert.deepEqual(marked.absorbed, [items[1]]);
+  assert.deepEqual(items[0].mergedFrom.map((source) => source.dmId), ['d1', 'd2']);
+  assert.match(items[0].content, /first[\s\S]*second/);
+  assert.equal(items[2].content, 'third', 'group batching remains owned by the group path');
 });
 
 // ---------- window resolution ----------
