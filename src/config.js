@@ -48,6 +48,7 @@ const DEFAULTS = {
   dbPath: './data/mousecrew.db',
   archivePath: './data/group-archive.jsonl',
   tokenFile: '~/.config/mousecrew/auth.json',
+  projects: [],
   nudge: {
     enabled: true,
     scanMs: 300000,
@@ -65,6 +66,41 @@ const DEFAULTS = {
 
 const VALID_TRANSPORTS = new Set(['local', 'remote', 'terminal']);
 const VALID_RUNNERS = new Set(['claude', 'exec']);
+
+function validateProjects(projects) {
+  if (!Array.isArray(projects)) {
+    return { projects: [], errors: ['projects: expected an array'] };
+  }
+
+  const errors = [];
+  const ids = new Set();
+  const prefixes = new Map();
+  for (const [index, project] of projects.entries()) {
+    if (!project || typeof project !== 'object' || Array.isArray(project)) {
+      errors.push(`projects[${index}]: expected an object`);
+      continue;
+    }
+    const where = `project "${project.id || `(index ${index})`}"`;
+    if (typeof project.id !== 'string' || !project.id.trim()) {
+      errors.push(`${where}: id must be a non-empty string`);
+    } else if (ids.has(project.id)) {
+      errors.push(`${where}: duplicate id`);
+    } else {
+      ids.add(project.id);
+    }
+    if (typeof project.name !== 'string' || !project.name.trim()) {
+      errors.push(`${where}: name must be a non-empty string`);
+    }
+    if (typeof project.prefix !== 'string' || !/^[A-Z]{2,5}$/.test(project.prefix)) {
+      errors.push(`${where}: prefix "${project.prefix}" must be 2-5 uppercase letters`);
+    } else if (prefixes.has(project.prefix)) {
+      errors.push(`${where}: prefix "${project.prefix}" is also used by "${prefixes.get(project.prefix)}"`);
+    } else {
+      prefixes.set(project.prefix, project.id);
+    }
+  }
+  return { projects, errors };
+}
 
 /**
  * Validate the roster. Returns { agents, errors } — the caller decides whether to die.
@@ -180,6 +216,12 @@ function load({ configFile, agentsFile, root } = {}) {
   cfg.tokenFile = expandTilde(cfg.tokenFile);
   cfg.contextWatch.handoffDir = path.resolve(base, expandTilde(cfg.contextWatch.handoffDir));
 
+  const projectConfig = validateProjects(cfg.projects);
+  if (projectConfig.errors.length) {
+    throw new Error('project config is invalid:\n  - ' + projectConfig.errors.join('\n  - '));
+  }
+  cfg.projects = projectConfig.projects;
+
   if (!fs.existsSync(agtPath)) {
     throw new Error(`agents file not found: ${agtPath} (copy agents.example.json to agents.json)`);
   }
@@ -192,4 +234,4 @@ function load({ configFile, agentsFile, root } = {}) {
   return { config: cfg, agents: roster.map(normalizeAgent) };
 }
 
-module.exports = { load, validateAgents, normalizeAgent, expandTilde, stripComments, DEFAULTS };
+module.exports = { load, validateAgents, validateProjects, normalizeAgent, expandTilde, stripComments, DEFAULTS };

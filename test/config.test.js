@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { validateAgents } = require('../src/config');
+const { validateAgents, validateProjects } = require('../src/config');
 
 const ok = (agents) => validateAgents(agents).errors;
 
@@ -70,4 +70,20 @@ test('duplicate ids are caught', () => {
 
 test('an empty roster is an error, not an empty crew', () => {
   assert.ok(validateAgents([]).errors.length);
+});
+
+test('projects require unique ids and unique 2-5 letter uppercase prefixes', () => {
+  assert.deepEqual(validateProjects([
+    { id: 'app', name: 'Application', prefix: 'APP' },
+    { id: 'docs', name: 'Documentation', prefix: 'DOCS' },
+  ]).errors, []);
+
+  const errors = validateProjects([
+    { id: 'app', name: 'Application', prefix: 'app' },
+    { id: 'app', name: 'Second app', prefix: 'DOC' },
+    { id: 'docs', name: 'Documentation', prefix: 'DOC' },
+  ]).errors;
+  assert.ok(errors.some((error) => /prefix "app" must be 2-5 uppercase letters/.test(error)));
+  assert.ok(errors.some((error) => /duplicate id/.test(error)));
+  assert.ok(errors.some((error) => /prefix "DOC" is also used by "app"/.test(error)));
 });

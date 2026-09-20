@@ -7,6 +7,12 @@
   "// tokenFile": "Bearer token for every API call. Keep this file OUTSIDE any git tree, mode 0600.",
   "tokenFile": "~/.config/mousecrew/auth.json",
 
+  "// projects": "The source of truth for work-order projects and their unique ID prefixes.",
+  "projects": [
+    { "id": "app", "name": "Application", "prefix": "APP" },
+    { "id": "docs", "name": "Documentation", "prefix": "DOC" }
+  ],
+
   "// nudge": "Chase whoever currently owes an action on an open order.",
   "nudge": {
     "enabled": true,

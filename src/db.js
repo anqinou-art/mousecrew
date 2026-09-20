@@ -28,6 +28,7 @@ function open(dbPath) {
     CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
+      prefix TEXT,
       repo TEXT,
       description TEXT,
       created_at DATETIME DEFAULT (datetime('now'))
@@ -162,6 +163,7 @@ function open(dbPath) {
     'ALTER TABLE work_orders ADD COLUMN git_branch TEXT',
     'ALTER TABLE work_orders ADD COLUMN audit_revision INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE work_orders ADD COLUMN frozen INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE projects ADD COLUMN prefix TEXT',
   ]) {
     try { db.exec(sql); } catch { /* already there */ }
   }
@@ -175,6 +177,7 @@ function open(dbPath) {
     all: db.prepare('SELECT * FROM work_orders ORDER BY created_at DESC'),
     getById: db.prepare('SELECT * FROM work_orders WHERE id = ?'),
     getByStatus: db.prepare('SELECT * FROM work_orders WHERE status = ?'),
+    getByProject: db.prepare('SELECT * FROM work_orders WHERE project_id = ? ORDER BY created_at DESC'),
     getBlockedBy: db.prepare("SELECT * FROM work_orders WHERE blocked_by = ? AND status = 'paused'"),
     create: db.prepare(`INSERT INTO work_orders (id, project_id, title, description, status, assignee, repo, created_by, timeline)
                         VALUES (@id, @project_id, @title, @description, @status, @assignee, @repo, @created_by, @timeline)`),
@@ -188,7 +191,9 @@ function open(dbPath) {
     // Scheduler notes are history, not work-order movement. Touching updated_at here would
     // make the scheduler read its own note as evidence that the assignee acted.
     appendTimelineNote: db.prepare('UPDATE work_orders SET timeline = ? WHERE id = ?'),
-    nextSeq: db.prepare("SELECT COUNT(*) AS n FROM work_orders"),
+    maxSeqForPrefix: db.prepare(
+      'SELECT MAX(CAST(substr(id, ?) AS INTEGER)) AS n FROM work_orders WHERE id LIKE ?'
+    ),
   };
 
   const log = {
@@ -208,7 +213,8 @@ function open(dbPath) {
   const project = {
     all: db.prepare('SELECT * FROM projects ORDER BY created_at DESC'),
     getById: db.prepare('SELECT * FROM projects WHERE id = ?'),
-    upsert: db.prepare('INSERT INTO projects (id, name, repo, description) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, repo = excluded.repo'),
+    upsert: db.prepare(`INSERT INTO projects (id, name, prefix) VALUES (?, ?, ?)
+                        ON CONFLICT(id) DO UPDATE SET name = excluded.name, prefix = excluded.prefix`),
   };
 
   const thread = {

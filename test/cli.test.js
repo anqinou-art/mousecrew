@@ -101,6 +101,28 @@ test('create dispatches work for someone else but starts work assigned to the ac
   assert.equal(selfApi.requests[1].body.to_status, 'in_progress');
 });
 
+test('project commands pass -p through and list configured projects', async (t) => {
+  const createApi = await scriptedApi(t, [
+    { body: { id: 'APP-001', status: 'draft', assignee: null } },
+  ]);
+  const created = await runCli(['create', '-p', 'app', '--title', 'project task'], createApi.base);
+  assert.equal(created.code, 0, created.stderr);
+  assert.equal(createApi.requests[0].body.project_id, 'app');
+
+  const listApi = await scriptedApi(t, [{ body: [] }]);
+  const listed = await runCli(['list', '-p', 'app'], listApi.base);
+  assert.equal(listed.code, 0, listed.stderr);
+  assert.equal(listApi.requests[0].path, '/api/orders?project_id=app');
+
+  const projectsApi = await scriptedApi(t, [{ body: [
+    { id: 'app', name: 'Application', prefix: 'APP' },
+  ] }]);
+  const projects = await runCli(['projects'], projectsApi.base);
+  assert.equal(projects.code, 0, projects.stderr);
+  assert.equal(projectsApi.requests[0].path, '/api/projects');
+  assert.match(projects.stdout, /app\s+Application\s+APP/);
+});
+
 test('accept identifies the actor, and cancellation sends an explicit intent and reason', async (t) => {
   const acceptApi = await scriptedApi(t, [
     { body: { ok: true, from: 'assigned', to: 'in_progress', order: { status: 'in_progress' } } },

@@ -32,9 +32,18 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
 
   router.use(requireToken);
 
-  function nextId() {
-    const n = store.order.nextSeq.get().n + 1;
-    return `${config.orderPrefix || 'WO'}-${String(n).padStart(3, '0')}`;
+  function createOrder(prefix, fields) {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const n = (store.order.maxSeqForPrefix.get(prefix.length + 2, `${prefix}-%`).n || 0) + 1;
+      const id = `${prefix}-${String(n).padStart(3, '0')}`;
+      try {
+        store.order.create.run({ id, ...fields });
+        return store.order.getById.get(id);
+      } catch (error) {
+        if (!String(error.message).includes('UNIQUE constraint failed: work_orders.id')) throw error;
+      }
+    }
+    return null;
   }
 
   function card({ order_id, title, from_status, to_status, actor, assignee, comment }) {
@@ -192,7 +201,9 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
   // ---------- read ----------
 
   router.get('/api/orders', (req, res) => {
-    let rows = store.order.all.all();
+    let rows = req.query.project_id
+      ? store.order.getByProject.all(req.query.project_id)
+      : store.order.all.all();
     if (req.query.assignee) rows = rows.filter((o) => o.assignee === req.query.assignee);
     if (req.query.status) rows = rows.filter((o) => o.status === req.query.status);
     res.json(rows);
@@ -217,6 +228,24 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     const { title, description, assignee, repo, project_id, actor } = req.body || {};
     if (!title) return res.status(400).json({ error: 'title required' });
 
+    const projects = config.projects || [];
+    const availableProjects = projects.map((project) => project.id);
+    if (projects.length && !project_id) {
+      return res.status(400).json({
+        error: `project_id required; available projects: ${availableProjects.join(', ')}`,
+        available_projects: availableProjects,
+      });
+    }
+    const project = project_id
+      ? projects.find((candidate) => candidate.id === project_id)
+      : null;
+    if (project_id && !project) {
+      return res.status(404).json({
+        error: `unknown project_id "${project_id}"; available projects: ${availableProjects.join(', ') || '(none)'}`,
+        available_projects: availableProjects,
+      });
+    }
+
     // Ownership is checked at creation, not left to good manners. Assigning work to an
     // agent that does not own the repo is how changes end up in the wrong tree, and that
     // is measured in days to unwind, not minutes.
@@ -230,15 +259,21 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
       }
     }
 
-    const id = nextId();
     const now = new Date().toISOString();
-    store.order.create.run({
-      id, project_id: project_id || null, title, description: description || null,
+    const order = createOrder(project ? project.prefix : (config.orderPrefix || 'WO'), {
+      project_id: project_id || null, title, description: description || null,
       status: 'draft', assignee: assignee || null, repo: repo || null,
       created_by: actor || 'unknown',
       timeline: JSON.stringify([{ status: 'draft', actor: actor || 'unknown', ts: now }]),
     });
-    res.json(store.order.getById.get(id));
+    if (!order) {
+      const prefix = project ? project.prefix : (config.orderPrefix || 'WO');
+      return res.status(409).json({
+        error: 'could not allocate an order id',
+        detail: `prefix ${prefix} — 5 attempts all collided`,
+      });
+    }
+    res.json(order);
   });
 
   // ---------- dispatch / accept ----------

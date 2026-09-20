@@ -70,6 +70,7 @@ function flags(argv) {
     if (a === '--void') out.void = true;
     else if (a.startsWith('--')) { out[a.slice(2)] = argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : true; }
     else if (a === '-s') out.actor = argv[++i];
+    else if (a === '-p') out.project = argv[++i];
     else out._.push(a);
   }
   return out;
@@ -79,9 +80,11 @@ const NEXT = { draft: 'in_progress', in_progress: 'submitted', rejected: 'in_pro
 
 const USAGE = `mousecrew — drive the work board
 
-  list [--assignee X] [--status S]        list orders
+  list [-p project] [--assignee X] [--status S]
+                                          list orders
+  projects                                list configured projects
   show <id>                               one order with its timeline and agent logs
-  create --title "..." [--assignee X] [--repo R] [--desc "..."] [-s me]
+  create [-p project] --title "..." [--assignee X] [--repo R] [--desc "..."] [-s me]
   start <id> [-s me]                      draft -> in_progress
   dispatch <id> [--assignee X] [-s me]    draft -> assigned and notify the assignee
   accept <id> -s me                       accept assigned work, review, or rework
@@ -123,6 +126,7 @@ async function main() {
   switch (cmd) {
     case 'list': {
       const q = [];
+      if (f.project) q.push(`project_id=${encodeURIComponent(f.project)}`);
       if (f.assignee) q.push(`assignee=${encodeURIComponent(f.assignee)}`);
       if (f.status) q.push(`status=${encodeURIComponent(f.status)}`);
       const rows = await api('GET', '/api/orders' + (q.length ? '?' + q.join('&') : ''));
@@ -130,6 +134,15 @@ async function main() {
         console.log(`  ${o.id.padEnd(10)} ${String(o.status).padEnd(16)} ${String(o.assignee || '-').padEnd(12)} ${o.repo ? '[' + o.repo + '] ' : ''}${o.title}`);
       }
       console.log(`  (${rows.length} orders)`);
+      break;
+    }
+
+    case 'projects': {
+      const rows = await api('GET', '/api/projects');
+      for (const project of rows) {
+        console.log(`  ${String(project.id).padEnd(16)} ${String(project.name).padEnd(24)} ${project.prefix}`);
+      }
+      console.log(`  (${rows.length} projects)`);
       break;
     }
 
@@ -150,7 +163,7 @@ async function main() {
       const assignee = f.assignee || f.actor || null;
       const o = await api('POST', '/api/orders', {
         title: f.title, description: f.desc || null,
-        assignee, repo: f.repo || null, actor,
+        assignee, repo: f.repo || null, project_id: f.project || null, actor,
       });
       let status = 'draft';
       if (assignee && f.actor && assignee === f.actor) {
