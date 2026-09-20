@@ -37,7 +37,11 @@ const log = (...a) => console.log(stamp(), ...a);
  * Pure: how many turns are left, and are we below the line?
  * Exported so the arithmetic is testable without a server.
  */
-function assess(prev, now, thresholdTurns) {
+function assess(prev, now, thresholdTurns, thresholdTokens = null) {
+  const withTokenThreshold = (verdict) => ({
+    ...verdict,
+    warn: verdict.warn || (thresholdTokens !== null && now.tokens >= thresholdTokens),
+  });
   const room = now.limit - now.tokens;
   if (room <= 0) return { remain: 0, perTurn: null, warn: true, basis: 'full' };
 
@@ -46,33 +50,33 @@ function assess(prev, now, thresholdTurns) {
   // real number. Without it, an agent that rotated straight into heavy turns is invisible
   // for one cycle, which is exactly when it is at risk.
   if (!prev || prev.sessionId !== now.sessionId || now.msgs <= prev.msgs) {
-    if (!now.msgs) return { remain: Infinity, perTurn: null, warn: false, basis: 'no-data' };
+    if (!now.msgs) return withTokenThreshold({ remain: Infinity, perTurn: null, warn: false, basis: 'no-data' });
     const avg = now.tokens / now.msgs;
-    return { remain: Math.floor(room / avg), perTurn: avg, warn: Math.floor(room / avg) <= thresholdTurns, basis: 'window-average' };
+    return withTokenThreshold({ remain: Math.floor(room / avg), perTurn: avg, warn: Math.floor(room / avg) <= thresholdTurns, basis: 'window-average' });
   }
 
   const dTokens = now.tokens - prev.tokens;
   const dMsgs = now.msgs - prev.msgs;
-  if (dTokens <= 0) return { remain: Infinity, perTurn: 0, warn: false, basis: 'no-growth' };
+  if (dTokens <= 0) return withTokenThreshold({ remain: Infinity, perTurn: 0, warn: false, basis: 'no-growth' });
   const perTurn = dTokens / dMsgs;
   const remain = Math.floor(room / perTurn);
-  return { remain, perTurn, warn: remain <= thresholdTurns, basis: 'delta' };
+  return withTokenThreshold({ remain, perTurn, warn: remain <= thresholdTurns, basis: 'delta' });
 }
 
 function notice(name, remain, tokens, limit, perTurn, { handoff, handoffDir }) {
-  const lines = [
-    `Heads-up: your context window is nearly full — about ${remain} turn(s) left.`,
-    `Currently ${Math.round(tokens / 1000)}k of ${Math.round(limit / 1000)}k, growing ~${Math.round((perTurn || 0) / 1000)}k per turn.`,
-  ];
+  const lines = [Number.isFinite(remain)
+    ? `Heads-up: your context window is nearly full — about ${remain} turn(s) left.`
+    : `Heads-up: your context window is nearly full.`];
+  lines.push(`Currently ${Math.round(tokens / 1000)}k of ${Math.round(limit / 1000)}k, growing ~${Math.round((perTurn || 0) / 1000)}k per turn.`);
   if (handoff) {
     lines.push(
       `When the thing in your hands reaches a clean stopping point, write a handoff to`,
       `${path.join(handoffDir, name + '-handoff', today() + '.md')} — what you did, what is left, what to watch out for —`,
-      `then rotate: POST /api/agents/${name}/session/new (or ask a human to).`,
+      `then rotate gracefully with: mousecrew rotate ${name} (or POST /api/agents/${name}/session/rotate).`,
       `Nobody will rotate you automatically; you know best when it is safe.`,
     );
   } else {
-    lines.push(`No handoff needed for you — your output already lands on disk. Just rotate when convenient.`);
+    lines.push(`No handoff needed for you — your output already lands on disk. Use mousecrew rotate ${name} when convenient.`);
   }
   return lines.join('\n');
 }
@@ -82,6 +86,7 @@ async function main() {
   const cw = config.contextWatch || {};
   if (cw.enabled === false) return;
   const threshold = cw.thresholdTurns || 10;
+  const thresholdTokens = cw.thresholdTokens ?? null;
   const noHandoff = new Set(cw.noHandoff || []);
   const statePath = path.join(path.dirname(config.dbPath), 'context-watch-state.json');
   const base = `http://${config.host}:${config.port}`;
@@ -104,11 +109,11 @@ async function main() {
     if (!s.processAlive) { log(`${cfg.id}: not running, skipped`); continue; }
 
     const now = { sessionId: s.sessionId, tokens: s.context.tokens, limit: s.context.limit, msgs: s.sessionMessages };
-    const verdict = assess(state[cfg.id], now, threshold);
+    const verdict = assess(state[cfg.id], now, threshold, thresholdTokens);
     const prevWarned = state[cfg.id] && state[cfg.id].warned && state[cfg.id].sessionId === now.sessionId;
     state[cfg.id] = { ...now, warned: prevWarned || false };
 
-    if (!Number.isFinite(verdict.remain)) { log(`${cfg.id}: ${verdict.basis}, nothing to say`); continue; }
+    if (!Number.isFinite(verdict.remain) && !verdict.warn) { log(`${cfg.id}: ${verdict.basis}, nothing to say`); continue; }
 
     if (verdict.warn && !prevWarned) {
       const body = notice(cfg.id, verdict.remain, now.tokens, now.limit, verdict.perTurn, {
@@ -117,7 +122,8 @@ async function main() {
       const res = await fetch(`${base}/api/agent/${cfg.id}/chat`, { method: 'POST', headers: H, body: JSON.stringify({ message: body }) });
       if (res.ok) {
         state[cfg.id].warned = true;
-        log(`${cfg.id}: WARNED — ~${verdict.remain} turns left (${Math.round(verdict.perTurn / 1000)}k/turn, via ${verdict.basis})`);
+        const turns = Number.isFinite(verdict.remain) ? `~${verdict.remain} turns left` : `${Math.round(now.tokens / 1000)}k tokens`;
+        log(`${cfg.id}: WARNED — ${turns} (${Math.round((verdict.perTurn || 0) / 1000)}k/turn, via ${verdict.basis})`);
       } else {
         log(`${cfg.id}: warn failed, HTTP ${res.status}`);
       }

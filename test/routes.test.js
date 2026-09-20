@@ -126,6 +126,34 @@ test('every route requires a token', async (t) => {
   assert.equal(bad.status, 401);
 });
 
+test('graceful rotation rejects unknown, terminal, and remote agents explicitly', async (t) => {
+  const terminal = await boot(t);
+  const unknown = await terminal.call('POST', '/api/agents/missing/session/rotate');
+  assert.equal(unknown.status, 404);
+  const unsupportedTerminal = await terminal.call('POST', '/api/agents/backend/session/rotate');
+  assert.equal(unsupportedTerminal.status, 501);
+  assert.equal(unsupportedTerminal.body.code, 'session_rotation_unsupported');
+
+  const remote = await boot(t, REMOTE_GATE_CREW);
+  const unsupportedRemote = await remote.call('POST', '/api/agents/auditor/session/rotate');
+  assert.equal(unsupportedRemote.status, 501);
+  assert.equal(unsupportedRemote.body.code, 'session_rotation_unsupported');
+});
+
+test('the graceful rotation route returns only whether work queued or started', async (t) => {
+  const localCrew = [{
+    id: 'backend', transport: 'local', runner: 'claude', workDir: '/tmp/mousecrew-route-local', repos: ['server'],
+  }].map(normalizeAgent);
+  const { call, ctx } = await boot(t, localCrew);
+  let calls = 0;
+  ctx.manager.runtime = () => ({ rotate: () => { calls++; return { queued: true }; } });
+  const result = await call('POST', '/api/agents/backend/session/rotate');
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body, { queued: true });
+  assert.equal(calls, 1);
+  assert.ok(!('ok' in result.body), 'the request response must not claim verification success');
+});
+
 // ---------- projects and order ids ----------
 
 const PROJECTS = [

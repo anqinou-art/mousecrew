@@ -102,6 +102,7 @@ const USAGE = `mousecrew — drive the work board
   dm --to <agent> "text"                      message one agent
   reply --as <agent> "text"                   answer a direct message
   identity <agent> [--window ref]              claim this window for a crew member
+  rotate <agent>                               rotate a local agent after its current turn
   status                                      every agent's state
 
 Threads — work you can put down and pick back up (see docs/THREADS.zh-CN.md):
@@ -378,6 +379,16 @@ async function main() {
       break;
     }
 
+    case 'rotate': {
+      if (!id) die('need <agent>');
+      const r = await api('POST', `/api/agents/${id}/session/rotate`);
+      console.log(r.queued
+        ? `${id}: rotation queued until the current turn finishes`
+        : `${id}: rotation started`);
+      console.log('check `mousecrew status` for the verified result');
+      break;
+    }
+
     // Threads. One verb per kind of change, mirroring the API — the CLI does not get a
     // shortcut the API refuses, because then the gate would only apply to whoever used curl.
     case 'thread': {
@@ -484,6 +495,10 @@ async function main() {
       for (const [name, v] of Object.entries(s)) {
         const ctx = v.context ? ` ctx ${Math.round((v.context.tokens || 0) / 1000)}k/${Math.round(v.context.limit / 1000)}k` : '';
         console.log(`  ${name.padEnd(12)} ${String(v.transport).padEnd(9)} ${String(v.state).padEnd(10)}${ctx}`);
+        if (v.rotateQueued) console.log('               rotation queued');
+        if (v.lastRotate) {
+          console.log(`               last rotation ${v.lastRotate.ok ? 'verified' : 'failed'}: ${v.lastRotate.from || '-'} -> ${v.lastRotate.to || '-'}`);
+        }
       }
       break;
     }

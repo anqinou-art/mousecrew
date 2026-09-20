@@ -24,7 +24,7 @@ function fakeProcess() {
   return proc;
 }
 
-function makeRuntime(over = {}) {
+function makeRuntime(over = {}, deps = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-rt-'));
   const procs = [];
   const cfg = normalizeAgent({
@@ -34,6 +34,7 @@ function makeRuntime(over = {}) {
   const rt = new AgentRuntime(cfg, {
     dataDir: dir,
     spawn: () => { const p = fakeProcess(); procs.push(p); return p; },
+    ...deps,
   });
   return { rt, procs, dir };
 }
@@ -164,6 +165,77 @@ test('rotating to a new session drops the resume', async () => {
   assert.equal(rt.sessionId, null);
   assert.equal(rt.contextTokens, 0);
   assert.ok(!rt.buildSpawnArgs().args.includes('--resume'));
+  rt.destroy();
+});
+
+test('graceful rotation waits for the current answer, deduplicates requests, and drains queued work into the new process', async () => {
+  const handoffRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-handoff-'));
+  const handoffDir = path.join(handoffRoot, 'tester-handoff');
+  fs.mkdirSync(handoffDir);
+  fs.writeFileSync(path.join(handoffDir, '2026-09-20.md'), 'continue here');
+  const { rt, procs } = makeRuntime({}, {
+    contextWatch: { handoffDir: handoffRoot, noHandoff: [], handoffMaxAgeDays: 7 },
+  });
+  const first = rt.send('current work');
+  await new Promise((r) => setImmediate(r));
+  procs[0].say({ type: 'system', subtype: 'init', session_id: 'old-session' });
+
+  assert.deepEqual(rt.rotate(), { queued: true });
+  assert.deepEqual(rt.rotate(), { queued: true });
+  assert.equal(rt.status().rotateQueued, true);
+  const later = rt.send('queued work');
+  assert.equal(procs.length, 1);
+
+  procs[0].say({ type: 'result', result: 'finished', session_id: 'old-session' });
+  assert.equal((await first).text, 'finished');
+  assert.equal(rt.status().rotateQueued, false);
+  assert.equal(procs[0].written.length, 1, 'queued work must not reach the replaced process');
+
+  rt.start();
+  assert.equal(procs.length, 2, 'duplicate requests cause only one replacement');
+  const written = procs[1].written.map((line) => JSON.parse(line).message.content);
+  assert.match(written[0], /2026-09-20\.md/);
+  assert.equal(written[1], 'queued work');
+
+  procs[1].say({ type: 'system', subtype: 'init', session_id: 'new-session' });
+  assert.deepEqual(
+    { ...rt.status().lastRotate, at: 'ignored' },
+    { at: 'ignored', ok: true, from: 'old-session', to: 'new-session' },
+  );
+  procs[1].say({ type: 'result', result: 'new answer', session_id: 'new-session' });
+  assert.equal((await later).text, 'new answer');
+  rt.destroy();
+});
+
+test('rotation fails for the same session id and stale output cannot settle a replacement', async () => {
+  const { rt, procs } = makeRuntime();
+  const first = rt.send('work');
+  await new Promise((r) => setImmediate(r));
+  procs[0].say({ type: 'system', subtype: 'init', session_id: 'same-session' });
+  procs[0].say({ type: 'result', result: 'done', session_id: 'same-session' });
+  await first;
+
+  assert.deepEqual(rt.rotate(), { queued: false, rotating: true });
+  assert.equal(procs[0].killed, true, 'an idle runtime starts rotation immediately');
+
+  rt.start();
+  procs[0].say({ type: 'system', subtype: 'init', session_id: 'stale-session' });
+  assert.equal(rt.lastRotate, null, 'discarded process output must not settle verification');
+  procs[1].say({ type: 'system', subtype: 'init', session_id: 'same-session' });
+  assert.equal(rt.lastRotate.ok, false);
+  assert.equal(rt.lastRotate.from, 'same-session');
+  assert.equal(rt.lastRotate.to, 'same-session');
+  rt.destroy();
+});
+
+test('rotation verification times out without claiming success', async () => {
+  const { rt } = makeRuntime({}, { rotateVerifyMs: 10 });
+  rt.sessionId = 'old-session';
+  assert.deepEqual(rt.rotate(), { queued: false, rotating: true });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(rt.lastRotate.ok, false);
+  assert.equal(rt.lastRotate.from, 'old-session');
+  assert.equal(rt.lastRotate.to, null);
   rt.destroy();
 });
 

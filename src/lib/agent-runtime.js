@@ -23,6 +23,7 @@ const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 const fs = require('fs');
 const path = require('path');
+const { newWindowSignpost } = require('./handoff');
 
 class AgentRuntime extends EventEmitter {
   /**
@@ -52,6 +53,15 @@ class AgentRuntime extends EventEmitter {
     this._restartTimer = null;
     this._restartCount = 0;
     this._stopping = false;
+    this._generation = 0;
+
+    this._pendingRotate = null;
+    this._rotateVerify = null;
+    this._rotateVerifyTimer = null;
+    this._pendingBriefing = null;
+    this.lastRotate = null;
+    this._rotateVerifyMs = deps.rotateVerifyMs || 30_000;
+    this._contextWatch = deps.contextWatch || {};
 
     this.contextLimit = cfg.contextLimit || 200_000;
     this.contextTokens = 0;
@@ -98,6 +108,47 @@ class AgentRuntime extends EventEmitter {
     return { previous: old };
   }
 
+  /** Finish the current turn before replacing its process and session. */
+  rotate() {
+    if (this._pendingRotate) return { queued: true };
+    if (this._rotateVerify) return { queued: false, rotating: true };
+    const request = { requestedAt: new Date().toISOString() };
+    if (this.currentJob || this.state === 'busy') {
+      this._pendingRotate = request;
+      return { queued: true };
+    }
+    this._rotateNow(request);
+    return { queued: false, rotating: true };
+  }
+
+  _rotateNow(request) {
+    const from = this.sessionId || null;
+    this._rotateVerify = { from, requestedAt: request.requestedAt };
+    this._pendingBriefing = newWindowSignpost(this.name, {
+      handoffRoot: this._contextWatch.handoffDir,
+      noHandoff: this._contextWatch.noHandoff,
+      maxAgeDays: this._contextWatch.handoffMaxAgeDays,
+    });
+    this._rotateVerifyTimer = setTimeout(() => this._settleRotate(null), this._rotateVerifyMs);
+    if (this._rotateVerifyTimer.unref) this._rotateVerifyTimer.unref();
+
+    const hadProcess = !!this.proc;
+    this.newSession();
+    if (!hadProcess && this.cfg.runner !== 'exec') this.start();
+  }
+
+  _settleRotate(newId) {
+    if (!this._rotateVerify) return;
+    const { from } = this._rotateVerify;
+    this._rotateVerify = null;
+    if (this._rotateVerifyTimer) {
+      clearTimeout(this._rotateVerifyTimer);
+      this._rotateVerifyTimer = null;
+    }
+    const ok = !!newId && newId !== from;
+    this.lastRotate = { at: new Date().toISOString(), ok, from, to: newId || null };
+  }
+
   // ---------- process lifecycle ----------
 
   buildSpawnArgs() {
@@ -125,23 +176,27 @@ class AgentRuntime extends EventEmitter {
     const { command, args } = this.buildSpawnArgs();
     console.log(`[${this.name}] starting ${command}${this.sessionId ? ` (resume ${this.sessionId.slice(0, 8)})` : ' (new session)'}`);
 
-    this.proc = this._spawn(command, args, {
+    const generation = ++this._generation;
+    const proc = this._spawn(command, args, {
       cwd: this.cfg.workDir,
       env: process.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    this.proc = proc;
 
     this._stdoutBuf = '';
-    this.proc.stdout.on('data', (raw) => this._onStdout(raw));
-    this.proc.stderr.on('data', (raw) => {
+    proc.stdout.on('data', (raw) => this._onStdout(raw, generation));
+    proc.stderr.on('data', (raw) => {
+      if (generation !== this._generation) return;
       const m = raw.toString().trim();
       if (m) this.emit('log', { message: m.slice(0, 500) });
     });
-    this.proc.on('error', (e) => {
+    proc.on('error', (e) => {
+      if (generation !== this._generation) return;
       console.error(`[${this.name}] process error:`, e.message);
-      this._onExit(-1);
+      this._onExit(-1, generation, proc);
     });
-    this.proc.on('close', (code) => this._onExit(code));
+    proc.on('close', (code) => this._onExit(code, generation, proc));
 
     this._setState('idle');
     this._drain();
@@ -154,6 +209,7 @@ class AgentRuntime extends EventEmitter {
     }
     const proc = this.proc;
     this.proc = null;
+    this._generation++;
     if (proc) {
       try { proc.stdin.end(); } catch { /* already gone */ }
       // Both fallbacks are unref'd: in a server they change nothing, but in a test or a
@@ -167,7 +223,8 @@ class AgentRuntime extends EventEmitter {
     this._setState('stopped');
   }
 
-  _onExit(code) {
+  _onExit(code, generation = this._generation, proc = this.proc) {
+    if (generation !== this._generation || proc !== this.proc) return;
     this.proc = null;
     for (const t of ['_turnTimer', '_turnHardTimer']) {
       if (this[t]) { clearTimeout(this[t]); this[t] = null; }
@@ -219,6 +276,7 @@ class AgentRuntime extends EventEmitter {
       this.currentJob = null;
     }
     this.proc = null;
+    this._generation++;
     if (proc) { try { proc.kill('SIGTERM'); } catch {} }
     this._setState('error');       // not 'stopped', so _onExit reschedules and drains
     this._scheduleRestart();
@@ -228,6 +286,12 @@ class AgentRuntime extends EventEmitter {
     this.state = state;
     this.emit('state', { agent: this.name, state });
     if (this._idleTimer) { clearTimeout(this._idleTimer); this._idleTimer = null; }
+    if (state === 'idle' && !this.currentJob && this._pendingRotate) {
+      const request = this._pendingRotate;
+      this._pendingRotate = null;
+      this._rotateNow(request);
+      return;
+    }
     if (state === 'idle' && this.proc && this.cfg.idleTimeoutMs > 0) {
       this._idleTimer = setTimeout(() => {
         console.log(`[${this.name}] idle for ${Math.round(this.cfg.idleTimeoutMs / 60000)}min — standing down`);
@@ -244,7 +308,8 @@ class AgentRuntime extends EventEmitter {
 
   // ---------- stream handling ----------
 
-  _onStdout(raw) {
+  _onStdout(raw, generation = this._generation) {
+    if (generation !== this._generation) return;
     this._stdoutBuf += raw.toString();
     let idx;
     while ((idx = this._stdoutBuf.indexOf('\n')) >= 0) {
@@ -269,6 +334,9 @@ class AgentRuntime extends EventEmitter {
   }
 
   _handleEvent(ev) {
+    if (ev.type === 'system' && ev.subtype === 'init' && ev.session_id && this._rotateVerify) {
+      this._settleRotate(ev.session_id);
+    }
     if (ev.session_id && ev.session_id !== this.sessionId) {
       this.sessionId = ev.session_id;
       this._saveSession();
@@ -409,6 +477,10 @@ class AgentRuntime extends EventEmitter {
     if (this._turnHardTimer.unref) this._turnHardTimer.unref();
 
     try {
+      if (this._pendingBriefing) {
+        this._writeMessage(this._pendingBriefing);
+        this._pendingBriefing = null;
+      }
       this._writeMessage(job.message);
     } catch (e) {
       this.currentJob = null;
@@ -487,12 +559,18 @@ class AgentRuntime extends EventEmitter {
       sessionId: this.sessionId,
       context: { tokens: this.contextTokens, limit: this.contextLimit },
       sessionMessages: this.sessionMessages,
+      lastRotate: this.lastRotate,
+      rotateQueued: !!this._pendingRotate,
       stats: this.stats,
     };
   }
 
   /** Public teardown used by tests and shutdown. Never leaves a timer behind. */
   destroy() {
+    if (this._rotateVerifyTimer) {
+      clearTimeout(this._rotateVerifyTimer);
+      this._rotateVerifyTimer = null;
+    }
     this.stop();
     this.removeAllListeners();
   }

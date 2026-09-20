@@ -82,7 +82,14 @@ const DEFAULTS = {
     wakeMaxContent: DEFAULT_WAKE_MAX_CONTENT,
     wakeSettleMs: DEFAULT_WAKE_SETTLE_MS,
   },
-  contextWatch: { enabled: true, thresholdTurns: 10, noHandoff: [], handoffDir: './data/handoff' },
+  contextWatch: {
+    enabled: true,
+    thresholdTurns: 10,
+    thresholdTokens: null,
+    noHandoff: [],
+    handoffDir: './data/handoff',
+    handoffMaxAgeDays: 7,
+  },
   notify: { type: 'none', url: '' },
   remoteBridge: { enabled: true, reconnectWaitMs: 60000 },
 };
@@ -251,6 +258,13 @@ function load({ configFile, agentsFile, root } = {}) {
   cfg.archivePath = path.resolve(base, expandTilde(cfg.archivePath));
   cfg.tokenFile = expandTilde(cfg.tokenFile);
   cfg.contextWatch.handoffDir = path.resolve(base, expandTilde(cfg.contextWatch.handoffDir));
+  if (cfg.contextWatch.thresholdTokens !== null
+      && (!Number.isInteger(cfg.contextWatch.thresholdTokens) || cfg.contextWatch.thresholdTokens < 1)) {
+    throw new Error('contextWatch.thresholdTokens must be a positive integer when configured');
+  }
+  if (!Number.isInteger(cfg.contextWatch.handoffMaxAgeDays) || cfg.contextWatch.handoffMaxAgeDays < 0) {
+    throw new Error('contextWatch.handoffMaxAgeDays must be a non-negative integer');
+  }
   cfg.verifyRepos = normalizeVerifyRepos(cfg.verifyRepos, base);
   cfg.deployTrees = normalizeDeployTrees(cfg.deployTrees, base);
   if (typeof cfg.delivery.batchGroup !== 'boolean') {

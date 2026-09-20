@@ -54,14 +54,22 @@ test('the notice tells the agent to finish first, and to hand off', () => {
   const withHandoff = notice('backend', 4, 180_000, 200_000, 5_000, { handoff: true, handoffDir: '/tmp/handoff' });
   assert.match(withHandoff, /4 turn/);
   assert.match(withHandoff, /clean stopping point/);
-  assert.match(withHandoff, /session\/new/);
+  assert.match(withHandoff, /session\/rotate/);
   assert.match(withHandoff, /Nobody will rotate you automatically/);
 
   // Some agents produce nothing that would be lost. Asking them for a handoff is asking
   // for busywork.
   const without = notice('clerk', 4, 180_000, 200_000, 5_000, { handoff: false, handoffDir: '/tmp/handoff' });
   assert.match(without, /No handoff needed/);
+  assert.match(without, /mousecrew rotate clerk/);
   assert.ok(!/clean stopping point/.test(without));
+});
+
+test('an optional absolute token threshold warns before the turns threshold', () => {
+  const prev = { sessionId: 's', tokens: 119_000, msgs: 9 };
+  const now = { sessionId: 's', tokens: 120_000, limit: 200_000, msgs: 10 };
+  assert.equal(assess(prev, now, 10).warn, false, 'unset keeps the turns-only behavior');
+  assert.equal(assess(prev, now, 10, 120_000).warn, true);
 });
 
 test('timestamps are local wall-clock, not UTC', () => {

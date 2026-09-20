@@ -217,3 +217,15 @@ test('restart-done passes named ids through and exits nonzero when any order is 
   assert.match(result.stdout, /unchecked.*WO-001/);
   assert.match(result.stderr, /skipped WO-002: commit-not-in-deploy-tree/);
 });
+
+test('rotate uses the graceful endpoint and does not claim an unverified success', async (t) => {
+  const api = await scriptedApi(t, [{ body: { queued: true } }]);
+  const result = await runCli(['rotate', 'backend'], api.base);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(api.requests.map((r) => [r.method, r.path]), [
+    ['POST', '/api/agents/backend/session/rotate'],
+  ]);
+  assert.match(result.stdout, /queued/);
+  assert.match(result.stdout, /status/);
+  assert.doesNotMatch(result.stdout, /success|succeeded/i);
+});
