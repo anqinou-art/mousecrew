@@ -95,6 +95,31 @@ test('the old verifyRepos array is refused with the object format in the error',
   );
 });
 
+test('delivery batching config has defaults and refuses invalid types at startup', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-delivery-config-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const agentsFile = path.join(dir, 'agents.json');
+  fs.writeFileSync(agentsFile, JSON.stringify({
+    agents: [{ id: 'worker', transport: 'local', workDir: '/tmp/worker' }],
+  }));
+  const defaultsFile = path.join(dir, 'config-defaults.json');
+  fs.writeFileSync(defaultsFile, '{}');
+  assert.deepEqual(load({ configFile: defaultsFile, agentsFile, root: dir }).config.delivery, {
+    stalePendingMs: 600000,
+    maxPending: 200,
+    batchGroup: true,
+    inlineLimit: 600,
+  });
+  for (const [delivery, expected] of [
+    [{ batchGroup: 'yes' }, /delivery\.batchGroup must be a boolean/],
+    [{ inlineLimit: 0 }, /delivery\.inlineLimit must be a positive integer/],
+  ]) {
+    const configFile = path.join(dir, `config-${Object.keys(delivery)[0]}.json`);
+    fs.writeFileSync(configFile, JSON.stringify({ delivery }));
+    assert.throws(() => load({ configFile, agentsFile, root: dir }), expected);
+  }
+});
+
 test('an empty roster is an error, not an empty crew', () => {
   assert.ok(validateAgents([]).errors.length);
 });

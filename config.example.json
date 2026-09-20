@@ -35,10 +35,12 @@
     "backoffAfter": 3
   },
 
-  "// delivery": "Terminal-window agents only: back-pressure and the staleness cutoff.",
+  "// delivery": "Terminal-window agents only: back-pressure, batching, long-message storage, and the staleness cutoff.",
   "delivery": {
     "stalePendingMs": 600000,
-    "maxPending": 200
+    "maxPending": 200,
+    "batchGroup": true,
+    "inlineLimit": 600
   },
 
   "// contextWatch": "Warn an agent when its context window is close to full.",

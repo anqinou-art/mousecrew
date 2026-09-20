@@ -23,6 +23,8 @@ const DEFAULTS = {
   postInjectMs: 800,
   stalePendingMs: 10 * 60 * 1000,
   maxPending: 200,
+  batchGroup: core.DEFAULT_BATCH_GROUP,
+  inlineLimit: core.DEFAULT_INLINE_LIMIT,
   screenLines: 12,
   busyPattern: 'esc to interrupt',
 };
@@ -206,6 +208,29 @@ class Sidecar extends EventEmitter {
     this._saveState();
   }
 
+  _persistBody(agent, text) {
+    if (!this.statePath) {
+      this.emit('event', { type: 'body-save-failed', agent, error: 'no state path configured' });
+      return null;
+    }
+    try {
+      const agentId = String(agent || 'unknown');
+      const partition = /^[A-Za-z0-9_-]+$/.test(agentId)
+        ? agentId
+        : `id-${Buffer.from(agentId).toString('base64url')}`;
+      const dir = path.join(path.dirname(this.statePath), 'inbox', partition);
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const stamp = new Date(this.now()).toISOString().replace(/[:.]/g, '-');
+      const file = path.join(dir, `${stamp}-${core.fingerprint(text).slice(0, 8)}.txt`);
+      fs.writeFileSync(file, text, { mode: 0o600 });
+      fs.chmodSync(file, 0o600);
+      return file;
+    } catch (e) {
+      this.emit('event', { type: 'body-save-failed', agent, error: e.message });
+      return null;
+    }
+  }
+
   /**
    * One delivery pass: for each crew member with something waiting, if their window is
    * free, type the oldest item in.
@@ -228,7 +253,8 @@ class Sidecar extends EventEmitter {
     const delivered = [];
     for (const agent of [...new Set(this.state.pending.map((p) => p.agent))]) {
       if (this._draining.has(agent)) continue;
-      const item = this.state.pending.find((p) => p.agent === agent);
+      const batch = core.nextDeliverableBatch(this.state.pending, agent, this.opt.batchGroup);
+      const item = batch[0];
       if (!item) continue;
 
       const cfg = this.byId.get(agent);
@@ -253,16 +279,30 @@ class Sidecar extends EventEmitter {
 
       this._draining.add(agent);
       try {
-        const text = core.envelope({ kind: item.kind, agent, sender: item.sender, content: item.content, cli: this.opt.cli });
+        const body = core.batchBody(batch);
+        const fullText = core.batchEnvelope({ items: batch, agent, cli: this.opt.cli });
+        const bodyFile = body.length > this.opt.inlineLimit
+          ? this._persistBody(agent, fullText)
+          : null;
+        const text = bodyFile
+          ? core.batchEnvelope({
+            items: batch, agent, cli: this.opt.cli,
+            bodyFile, inlineLimit: this.opt.inlineLimit,
+          })
+          : fullText;
         await this.adapter.sendText(found.ref, text);
         await new Promise((r) => setTimeout(r, this.opt.postInjectMs));
         await this.adapter.sendKey(found.ref, 'enter');
 
-        this.state.pending = this.state.pending.filter((p) => p !== item);
+        const deliveredBatch = new Set(batch);
+        this.state.pending = this.state.pending.filter((p) => !deliveredBatch.has(p));
         this._saveState();
-        this.emit('event', { type: 'injected', agent, ref: found.ref, kind: item.kind, chars: text.length });
+        this.emit('event', {
+          type: 'injected', agent, ref: found.ref, kind: item.kind,
+          chars: text.length, count: batch.length,
+        });
         if (item.kind === 'dm' && item.dmId) this._queueAck(item.dmId, agent, 'delivered');
-        delivered.push({ agent, ref: found.ref, kind: item.kind });
+        delivered.push({ agent, ref: found.ref, kind: item.kind, count: batch.length });
       } catch (e) {
         // Injection failed: keep the item queued. Dropping it here would lose a message
         // for a reason the sender can never discover.

@@ -171,6 +171,16 @@ is decided, why messages expire, and what an adapter is and is not responsible f
 | Message never dropped | queued | expires after 10 minutes |
 | Lifecycle managed by | mousecrew | you |
 
+When a terminal window becomes idle, consecutive group messages for that crew member are
+combined into one injection and one response cycle. A direct message always remains a
+separate delivery so its receipt stays unambiguous. Set `delivery.batchGroup` to `false` to
+return to one message per pass.
+
+Message body text longer than `delivery.inlineLimit` (600 characters by default) is written
+to a private `0600` file beside the sidecar state. The terminal receives the first part, the
+file path, and an instruction to read the full text before replying. If that file cannot be
+written, the sidecar injects the complete text instead of dropping or silently truncating it.
+
 ---
 
 ## One agent, one repo

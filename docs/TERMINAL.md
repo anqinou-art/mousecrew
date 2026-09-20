@@ -55,8 +55,17 @@ group message
    → which window claims them?  (looked up fresh, never cached)
    → is that window busy?       (read the screen)
         busy  → wait, retry, and give up after 10 minutes
-        free  → type it in, press Enter
+        free  → batch consecutive group messages, type once, press Enter
 ```
+
+Direct messages are never included in a group batch: each one has its own delivery receipt.
+Set `delivery.batchGroup` to `false` for the previous one-message-per-pass behaviour.
+
+If one message body or a combined batch body exceeds `delivery.inlineLimit` (default 600
+characters), the sidecar stores the full delivery in a private `0600` file under its state
+directory. It types only the prefix and file path into the window, with an instruction to
+read the file before replying. A storage failure falls back to the complete inline delivery,
+so shortening the terminal input can never become message loss.
 
 **Busy is decided by reading the screen** and looking for the CLI's own marker
 (`busyPattern`). That sounds crude next to asking the tool how it is doing, and it is more

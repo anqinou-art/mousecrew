@@ -15,6 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { normalizeVerifyRepos, normalizeDeployTrees } = require('./lib/commit-verify');
+const { DEFAULT_BATCH_GROUP, DEFAULT_INLINE_LIMIT } = require('./lib/sidecar-core');
 
 function expandTilde(p) {
   if (typeof p !== 'string') return p;
@@ -61,7 +62,12 @@ const DEFAULTS = {
     backoffCapMs: 14400000,
     backoffAfter: 3,
   },
-  delivery: { stalePendingMs: 600000, maxPending: 200 },
+  delivery: {
+    stalePendingMs: 600000,
+    maxPending: 200,
+    batchGroup: DEFAULT_BATCH_GROUP,
+    inlineLimit: DEFAULT_INLINE_LIMIT,
+  },
   contextWatch: { enabled: true, thresholdTurns: 10, noHandoff: [], handoffDir: './data/handoff' },
   notify: { type: 'none', url: '' },
   remoteBridge: { enabled: true, reconnectWaitMs: 60000 },
@@ -229,6 +235,12 @@ function load({ configFile, agentsFile, root } = {}) {
   cfg.contextWatch.handoffDir = path.resolve(base, expandTilde(cfg.contextWatch.handoffDir));
   cfg.verifyRepos = normalizeVerifyRepos(cfg.verifyRepos, base);
   cfg.deployTrees = normalizeDeployTrees(cfg.deployTrees, base);
+  if (typeof cfg.delivery.batchGroup !== 'boolean') {
+    throw new Error('delivery.batchGroup must be a boolean');
+  }
+  if (!Number.isInteger(cfg.delivery.inlineLimit) || cfg.delivery.inlineLimit < 1) {
+    throw new Error('delivery.inlineLimit must be a positive integer');
+  }
 
   const projectConfig = validateProjects(cfg.projects);
   if (projectConfig.errors.length) {

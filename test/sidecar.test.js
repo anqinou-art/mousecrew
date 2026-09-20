@@ -6,7 +6,8 @@ const path = require('path');
 const { Sidecar } = require('../src/lib/sidecar');
 const { createFakeAdapter } = require('../adapters/terminal/fake');
 const { buildIdentity } = require('../src/lib/identity');
-const { normalizeAgent } = require('../src/config');
+const { load, normalizeAgent } = require('../src/config');
+const core = require('../src/lib/sidecar-core');
 
 // These drive the engine against an in-memory terminal and assert its structured events.
 //
@@ -165,6 +166,165 @@ test('a failed injection keeps the message queued', async () => {
   await h.sc.deliver();
   assert.equal(h.of('inject-failed').length, 1);
   assert.equal(h.sc.state.pending.length, 1, 'dropping it here would lose a message nobody could trace');
+});
+
+test('five consecutive group messages are injected and persisted as one batch', async () => {
+  const h = primed(harness());
+  h.sc.ingest(Array.from({ length: 5 }, (_, i) => (
+    msg('human', `@lead message ${i + 1}`, `2026-08-20T12:00:0${i}Z`)
+  )), 'sse');
+  let saves = 0;
+  const save = h.sc._saveState.bind(h.sc);
+  h.sc._saveState = () => { saves += 1; save(); };
+
+  await h.sc.deliver();
+
+  assert.equal(h.adapter.__test.sentTo('%1').length, 1);
+  assert.deepEqual(h.adapter.__test.window('%1').keys, ['enter']);
+  assert.equal(h.of('injected')[0].count, 5);
+  assert.equal(h.sc.state.pending.length, 0);
+  assert.equal(saves, 1, 'the successful batch is persisted once after it leaves the queue');
+});
+
+test('group, group, direct, group keeps order across three deliveries', async () => {
+  const h = primed(harness());
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'one', content: 'first' });
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'two', content: 'second' });
+  h.sc.queue({ agent: 'architect', kind: 'dm', sender: 'three', content: 'private', dmId: 'dm-batch' });
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'four', content: 'last' });
+
+  await h.sc.deliver();
+  await h.sc.deliver();
+  await h.sc.deliver();
+
+  const sent = h.adapter.__test.sentTo('%1');
+  assert.equal(sent.length, 3);
+  assert.ok(sent[0].indexOf('first') < sent[0].indexOf('second'));
+  assert.match(sent[1], /\[direct\].*private/);
+  assert.match(sent[2], /\[group\].*last/);
+  assert.deepEqual(h.of('injected').map((event) => event.count), [2, 1, 1]);
+  assert.deepEqual(h.acks, [{ agent: 'architect', dmId: 'dm-batch', status: 'delivered' }]);
+});
+
+test('a failed batch injection keeps every message for the next pass', async () => {
+  const h = primed(harness());
+  h.sc.ingest(Array.from({ length: 5 }, (_, i) => (
+    msg('human', `@lead retry ${i + 1}`, `2026-08-20T12:01:0${i}Z`)
+  )), 'sse');
+  const sendText = h.adapter.sendText.bind(h.adapter);
+  h.adapter.sendText = async () => { throw new Error('window went away'); };
+
+  await h.sc.deliver();
+  assert.equal(h.sc.state.pending.length, 5);
+  h.adapter.sendText = sendText;
+  await h.sc.deliver();
+
+  assert.equal(h.adapter.__test.sentTo('%1').length, 1);
+  assert.equal(h.of('injected')[0].count, 5);
+  assert.equal(h.sc.state.pending.length, 0);
+});
+
+test('long delivery text is stored privately and the injected prefix points to it', async () => {
+  const h = primed(harness({ options: { inlineLimit: 40 } }));
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'one', content: 'first' });
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'two', content: 'second' });
+  const full = core.batchEnvelope({ items: h.sc.state.pending, agent: 'architect' });
+  const body = core.batchBody(h.sc.state.pending);
+
+  await h.sc.deliver();
+
+  const injected = h.adapter.__test.sentTo('%1')[0];
+  const match = injected.match(/read the full message before replying: (.+)\]\n  — reply with:/);
+  assert.ok(match, injected);
+  assert.equal(injected.startsWith(`[group batch] 2 messages delivered together\n${body.slice(0, 40)}`), true);
+  assert.equal(injected.length, 40
+    + `[group batch] 2 messages delivered together\n\n\n[truncated — read the full message before replying: ${match[1]}]`
+      .concat('\n  — reply with: mousecrew say --as architect "..."').length);
+  assert.equal(fs.readFileSync(match[1], 'utf8'), full);
+  assert.equal(fs.statSync(match[1]).mode & 0o777, 0o600);
+});
+
+test('inline limit applies to the body rather than envelope overhead', async () => {
+  const h = primed(harness({ options: { inlineLimit: 40 } }));
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'human', content: 'x'.repeat(40) });
+
+  await h.sc.deliver();
+
+  assert.equal(h.of('body-save-failed').length, 0);
+  assert.equal(h.adapter.__test.sentTo('%1')[0], core.envelope({
+    kind: 'group', agent: 'architect', sender: 'human', content: 'x'.repeat(40),
+  }));
+  assert.equal(fs.existsSync(path.join(h.dir, 'inbox')), false);
+});
+
+test('a body-file failure falls back to injecting the complete text', async () => {
+  const h = primed(harness({ options: { inlineLimit: 20 } }));
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'human', content: 'complete me'.repeat(20) });
+  const full = core.batchEnvelope({ items: h.sc.state.pending, agent: 'architect' });
+  const blocker = path.join(h.dir, 'not-a-directory');
+  fs.writeFileSync(blocker, 'x');
+  h.sc.statePath = path.join(blocker, 'state.json');
+
+  await h.sc.deliver();
+
+  assert.equal(h.adapter.__test.sentTo('%1')[0], full);
+  assert.equal(h.of('body-save-failed').length, 1);
+  assert.equal(h.sc.state.pending.length, 0);
+});
+
+test('loaded agent ids cannot navigate long-message writes outside the state inbox', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-inbox-path-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  for (const [id, expectedPartition] of [
+    ['worker', 'worker'],
+    ['../../outside', `id-${Buffer.from('../../outside').toString('base64url')}`],
+  ]) {
+    const caseDir = path.join(root, expectedPartition);
+    const configFile = path.join(caseDir, 'config.json');
+    const agentsFile = path.join(caseDir, 'agents.json');
+    fs.mkdirSync(caseDir, { recursive: true });
+    fs.writeFileSync(configFile, JSON.stringify({ delivery: { inlineLimit: 10 } }));
+    fs.writeFileSync(agentsFile, JSON.stringify({ agents: [{
+      id, displayName: 'target', transport: 'terminal',
+      terminal: { adapter: 'fake', target: 'target' },
+    }] }));
+    const { config, agents } = load({ configFile, agentsFile, root: caseDir });
+    const adapter = createFakeAdapter({ windows: [{ ref: '%1', identity: 'target', screen: '> ' }] });
+    const statePath = path.join(caseDir, 'state', 'state.json');
+    const sc = new Sidecar({
+      adapter, identity: buildIdentity(agents), agents, client: {}, statePath,
+    }, {
+      postInjectMs: 0,
+      batchGroup: config.delivery.batchGroup,
+      inlineLimit: config.delivery.inlineLimit,
+    });
+    sc.queue({ agent: id, kind: 'group', sender: 'human', content: 'complete body' });
+
+    await sc.deliver();
+
+    const injected = adapter.__test.sentTo('%1')[0];
+    const bodyFile = injected.match(/read the full message before replying: (.+)\]\n/)[1];
+    const inbox = path.join(caseDir, 'state', 'inbox');
+    assert.equal(path.relative(inbox, bodyFile).startsWith('..'), false, bodyFile);
+    assert.equal(path.relative(inbox, bodyFile).split(path.sep)[0], expectedPartition);
+    assert.equal(fs.readFileSync(bodyFile, 'utf8'), core.envelope({
+      kind: 'group', agent: id, sender: 'human', content: 'complete body',
+    }));
+    assert.equal(sc.state.pending.length, 0);
+  }
+});
+
+test('batchGroup false preserves one-message-per-pass delivery', async () => {
+  const h = primed(harness({ options: { batchGroup: false } }));
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'one', content: 'first' });
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'two', content: 'second' });
+
+  await h.sc.deliver();
+
+  assert.equal(h.adapter.__test.sentTo('%1').length, 1);
+  assert.equal(h.of('injected')[0].count, 1);
+  assert.equal(h.sc.state.pending.length, 1);
 });
 
 // ---------- shelf life ----------

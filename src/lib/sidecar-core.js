@@ -12,6 +12,9 @@
 
 const crypto = require('crypto');
 
+const DEFAULT_BATCH_GROUP = true;
+const DEFAULT_INLINE_LIMIT = 600;
+
 // The separator is a NUL byte, written as an escape on purpose: a literal one in the
 // source makes git treat this whole file as binary, and `git diff` then answers
 // "Binary files differ" to the very question docs/AUDIT.md tells readers to ask.
@@ -130,6 +133,53 @@ function envelope({ kind, agent, sender, content, cli = 'mousecrew' }) {
   return `[group] ${sender}: ${content}\n  — reply with: ${cli} say --as ${agent} "..."`;
 }
 
+/** Take the next deliverable run for one agent without letting a direct message join it. */
+function nextDeliverableBatch(pending, agent, batchGroup = DEFAULT_BATCH_GROUP) {
+  const rows = Array.isArray(pending) ? pending : [];
+  const first = rows.find((item) => item && item.agent === agent);
+  if (!first || !batchGroup || first.kind !== 'group') return first ? [first] : [];
+
+  const batch = [];
+  let started = false;
+  for (const item of rows) {
+    if (!item || item.agent !== agent) continue;
+    if (!started) started = item === first;
+    if (!started) continue;
+    if (item.kind !== 'group') break;
+    batch.push(item);
+  }
+  return batch;
+}
+
+function batchBody(items) {
+  const batch = Array.isArray(items) ? items : [];
+  if (batch.length === 1) return String(batch[0].content || '');
+  return batch.map((item, index) => {
+    const sender = item.sender || '?';
+    const at = item.queuedAt || 'time unavailable';
+    return `--- ${index + 1}/${batch.length} · ${sender} · ${at} ---\n${item.content || ''}`;
+  }).join('\n\n');
+}
+
+function batchEnvelope({ items, agent, cli = 'mousecrew', bodyFile = null, inlineLimit = DEFAULT_INLINE_LIMIT }) {
+  const batch = Array.isArray(items) ? items : [];
+  if (batch.length === 1 && !bodyFile) {
+    const item = batch[0];
+    return envelope({ kind: item.kind, agent, sender: item.sender, content: item.content, cli });
+  }
+
+  const item = batch[0] || {};
+  const body = batchBody(batch);
+  const rendered = bodyFile
+    ? `${body.slice(0, inlineLimit)}\n\n[truncated — read the full message before replying: ${bodyFile}]`
+    : body;
+  const heading = batch.length === 1
+    ? `[${item.kind === 'dm' ? 'direct' : 'group'}] ${item.sender}: `
+    : `[group batch] ${batch.length} messages delivered together\n`;
+  const command = item.kind === 'dm' ? 'reply' : 'say';
+  return `${heading}${rendered}\n  — reply with: ${cli} ${command} --as ${agent} "..."`;
+}
+
 /**
  * Pick the window for an identity. Resolved fresh on every delivery, never cached: window
  * references are renumbered when sessions are restored, and a cached ref points at whatever
@@ -147,8 +197,9 @@ function resolveWindow(windows, identityName) {
 }
 
 module.exports = {
+  DEFAULT_BATCH_GROUP, DEFAULT_INLINE_LIMIT,
   fingerprint, normalizeMessage, messageKey,
   mentionTargets, isBusy,
   filterFresh, selectExpired, capPending,
-  envelope, resolveWindow,
+  envelope, nextDeliverableBatch, batchBody, batchEnvelope, resolveWindow,
 };
