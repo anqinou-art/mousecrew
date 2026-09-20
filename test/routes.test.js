@@ -572,7 +572,24 @@ test('assignee and merge gate can explicitly unfreeze, but rejected requests can
   await call('POST', `/api/orders/${first}/accept`, { actor: 'auditor' });
   assert.equal((await call('POST', `/api/orders/${first}/unfreeze`, { actor: 'backend' })).status, 400);
   assert.equal((await call('POST', `/api/orders/${first}/unfreeze`, { actor: 'stranger', reason: 'x' })).status, 403);
-  assert.equal(ctx.store.order.getById.get(first).frozen, 1);
+  const beforeBypass = ctx.store.order.getById.get(first);
+  const wrongActor = await call('POST', `/api/orders/${first}/transition`, {
+    to_status: 'in_progress', actor: 'stranger', comment: 'replace delivery',
+  });
+  const missingReason = await call('POST', `/api/orders/${first}/transition`, {
+    to_status: 'in_progress', actor: 'backend',
+  });
+  assert.equal(wrongActor.status, 409);
+  assert.equal(missingReason.status, 409);
+  assert.match(wrongActor.body.error, /unfreeze endpoint/);
+  const afterBypass = ctx.store.order.getById.get(first);
+  assert.deepEqual(
+    [afterBypass.status, afterBypass.frozen, afterBypass.audit_revision,
+      afterBypass.commit_hash, afterBypass.git_branch, afterBypass.files_changed],
+    [beforeBypass.status, beforeBypass.frozen, beforeBypass.audit_revision,
+      beforeBypass.commit_hash, beforeBypass.git_branch, beforeBypass.files_changed],
+  );
+  assert.equal(notices.length, 0);
   const byAssignee = await call('POST', `/api/orders/${first}/unfreeze`, { actor: 'backend', reason: 'change delivery' });
   assert.equal(byAssignee.status, 200, JSON.stringify(byAssignee.body));
   assert.equal(byAssignee.body.order.status, 'in_progress');
@@ -586,6 +603,29 @@ test('assignee and merge gate can explicitly unfreeze, but rejected requests can
   const byGate = await call('POST', `/api/orders/${second}/unfreeze`, { actor: 'auditor', reason: 'withdraw review' });
   assert.equal(byGate.status, 200, JSON.stringify(byGate.body));
   assert.equal(byGate.body.order.audit_revision, 1);
+});
+
+test('a migrated review without a snapshot still withdraws through the guarded endpoint', async (t) => {
+  const { call, ctx } = await boot(t, REMOTE_GATE_CREW);
+  const notices = [];
+  ctx.manager.remotes.set('auditor', {
+    online: true,
+    sendFn: async (text) => { notices.push(text); return { text: 'noted' }; },
+  });
+  const id = await newOrder(call, { assignee: 'backend', repo: 'server' });
+  place(ctx, id, 'auditing');
+
+  const generic = await call('POST', `/api/orders/${id}/transition`, {
+    to_status: 'in_progress', actor: 'backend', comment: 'repair legacy review',
+  });
+  assert.equal(generic.status, 409);
+  const withdrawn = await call('POST', `/api/orders/${id}/unfreeze`, {
+    actor: 'backend', reason: 'repair legacy review',
+  });
+  assert.equal(withdrawn.status, 200, JSON.stringify(withdrawn.body));
+  assert.equal(withdrawn.body.order.status, 'in_progress');
+  assert.equal(withdrawn.body.unfrozen_revision, 0);
+  assert.match(notices[0], /without a frozen revision was withdrawn: repair legacy review/);
 });
 
 test('review decisions require a revision, while pause and cancellation do not', async (t) => {

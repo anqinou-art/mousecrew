@@ -302,6 +302,11 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     if (!gate.ok) return res.status(400).json({ error: gate.error });
     const resumeGate = checkResumeTarget(o, to_status);
     if (!resumeGate.ok) return res.status(400).json({ error: resumeGate.error });
+    if (o.status === 'auditing' && to_status === 'in_progress') {
+      return res.status(409).json({
+        error: `${o.id} is in review; withdraw it with the unfreeze endpoint so actor, reason, and gate notification are enforced`,
+      });
+    }
 
     if (cancelled !== undefined && typeof cancelled !== 'boolean') {
       return res.status(400).json({ error: 'cancelled must be a boolean' });
@@ -522,8 +527,8 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     const { actor, reason } = req.body || {};
     if (!actor) return res.status(400).json({ error: 'actor required' });
     if (!String(reason || '').trim()) return res.status(400).json({ error: 'unfreeze requires a reason' });
-    if (!o.frozen || o.status !== 'auditing') {
-      return res.status(400).json({ error: `${o.id} is not frozen in review` });
+    if (o.status !== 'auditing') {
+      return res.status(400).json({ error: `${o.id} is not in review` });
     }
 
     const who = identity.normalizeAgentId(actor);
@@ -554,7 +559,9 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     sendNotice(
       result.order,
       gate,
-      `${o.id} review revision ${revision} was invalidated: ${String(reason).trim()}`,
+      revision > 0
+        ? `${o.id} review revision ${revision} was invalidated: ${String(reason).trim()}`
+        : `${o.id} review without a frozen revision was withdrawn: ${String(reason).trim()}`,
       'review invalidated',
       null,
       null,

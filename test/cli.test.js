@@ -49,6 +49,20 @@ test('advance stops at submitted instead of taking review for the assignee', asy
   assert.deepEqual(api.requests.map((r) => [r.method, r.path]), [['GET', '/api/orders/WO-001']]);
 });
 
+test('start cannot silently withdraw an order from review', async (t) => {
+  const api = await scriptedApi(t, [{
+    status: 409,
+    body: { error: 'order is in review; withdraw it with the unfreeze endpoint' },
+  }]);
+  const result = await runCli(['start', 'WO-001', '-s', 'worker'], api.base);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /unfreeze endpoint/);
+  assert.deepEqual(api.requests[0], {
+    method: 'POST', path: '/api/orders/WO-001/transition',
+    body: { to_status: 'in_progress', actor: 'worker' },
+  });
+});
+
 test('dispatch assigns first, then moves the order through the dispatch endpoint', async (t) => {
   const api = await scriptedApi(t, [
     { body: { id: 'WO-001', status: 'draft', assignee: 'worker' } },
