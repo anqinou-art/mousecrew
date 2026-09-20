@@ -4,7 +4,7 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const rotation = require('../src/lib/rotation');
 
 const CLI = path.join(__dirname, '..', 'bin', 'mousecrew.js');
@@ -469,7 +469,84 @@ fs.renameSync = function(from, to) {
   assert.equal(record.activity.state, 'busy');
   assert.equal(record.activity.sessionId, 'session-b');
   assert.equal(fs.existsSync(lock), false);
-  assert.equal(fs.existsSync(`${lock}.reclaim`), false);
+  assert.deepEqual(fs.readdirSync(dir).filter((name) => name.includes('.reclaim-')), []);
+});
+
+test('a stale reclaimer cannot remove a newer writer lock', async (t) => {
+  const root = localCrewRoot(t);
+  const dir = path.join(root, 'data', 'sessions');
+  const file = rotation.sessionRecordPath(dir, 'scout');
+  const lock = `${file}.lock`;
+  const ready = path.join(root, 'new-writer-inside-commit');
+  const finished = path.join(root, 'new-writer-finished');
+  const modulePath = path.join(__dirname, '..', 'src', 'lib', 'rotation.js');
+  const record = (sessionId) => ({
+    agent: 'scout', windowRef: '%1', sessionId,
+    transcriptPath: `/tmp/${sessionId}.jsonl`,
+  });
+  const childCode = (sessionId, extra = '') => `
+const fs = require('fs');
+const rotation = require(${JSON.stringify(modulePath)});
+${extra}
+rotation.writeSessionRecord(
+  ${JSON.stringify(dir)},
+  ${JSON.stringify(record(sessionId))},
+  typeof deps === 'undefined' ? {} : deps,
+);
+`;
+  const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+  rotation.writeSessionRecord(dir, record('session-a'));
+  const interrupted = spawnSync(process.execPath, ['-e', childCode(
+    'interrupted', 'const deps = { rename() { process.exit(73); } };',
+  )], { encoding: 'utf8' });
+  assert.equal(interrupted.status, 73);
+
+  let contender;
+  let contenderResult;
+  let mainReads = 0;
+  rotation.writeSessionRecord(dir, record('session-b'), {
+    lockReadFile(target, encoding) {
+      if (target !== lock || ++mainReads !== 1) return fs.readFileSync(target, encoding);
+      const observedDeadOwner = fs.readFileSync(target, encoding);
+      const firstRecovery = spawnSync(process.execPath, [
+        '-e', childCode('first-recovery'),
+      ], { encoding: 'utf8', timeout: 10_000 });
+      assert.equal(firstRecovery.status, 0, firstRecovery.stderr);
+      assert.equal(fs.existsSync(lock), false);
+
+      const extra = `const deps = { rename(from, to) {
+        fs.writeFileSync(${JSON.stringify(ready)}, 'ready');
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 800);
+        fs.renameSync(from, to);
+        fs.writeFileSync(${JSON.stringify(finished)}, 'done');
+      } };`;
+      contender = spawn(process.execPath, ['-e', childCode('session-c', extra)], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      contenderResult = new Promise((resolve) => {
+        let stderr = '';
+        contender.stderr.on('data', (chunk) => { stderr += chunk; });
+        contender.on('close', (code) => resolve({ code, stderr }));
+      });
+      const deadline = Date.now() + 3000;
+      while (!fs.existsSync(ready) && Date.now() < deadline) sleep(5);
+      assert.equal(fs.existsSync(ready), true);
+      assert.equal(JSON.parse(fs.readFileSync(lock, 'utf8')).pid, contender.pid);
+      return observedDeadOwner;
+    },
+    rename(from, to) {
+      assert.equal(fs.existsSync(finished), true, 'the newer writer must leave first');
+      fs.renameSync(from, to);
+    },
+  });
+
+  const completed = await contenderResult;
+  assert.equal(completed.code, 0, completed.stderr);
+  const current = rotation.readSessionRecord(dir, 'scout');
+  assert.equal(current.sessionId, 'session-b');
+  assert.equal(fs.existsSync(lock), false);
+  assert.deepEqual(fs.readdirSync(dir).filter((name) => name.includes('.reclaim-')), []);
 });
 
 test('session-record keeps an encoded-looking id separate from the id that encodes to it', async (t) => {

@@ -82,9 +82,72 @@ function releaseOwnedLock(lock, owner, deps) {
   lockUnlink(lock);
 }
 
+function cleanupAbandonedReclaims(lock, {
+  lockReadDir = fs.readdirSync, lockUnlink = fs.unlinkSync, ...deps
+} = {}) {
+  const dir = path.dirname(lock);
+  const prefix = `${path.basename(lock)}.reclaim-`;
+  let entries;
+  try { entries = lockReadDir(dir); } catch (error) {
+    if (error && error.code === 'ENOENT') return;
+    throw error;
+  }
+  for (const entry of entries) {
+    if (!entry.startsWith(prefix)) continue;
+    const suffix = entry.slice(prefix.length);
+    const separator = suffix.indexOf('-');
+    const pidText = separator < 0 ? '' : suffix.slice(0, separator);
+    if (!/^[1-9]\d*$/.test(pidText)) continue;
+    const pid = Number.parseInt(pidText, 10);
+    if (!Number.isSafeInteger(pid)
+        || isLockOwnerAlive({ pid, token: 'reclaim' }, deps)) continue;
+    try { lockUnlink(path.join(dir, entry)); } catch (error) {
+      if (!error || error.code !== 'ENOENT') throw error;
+    }
+  }
+}
+
+function reclaimAbandonedLock(lock, deps) {
+  const {
+    lockLink = fs.linkSync, lockStat = fs.statSync, lockUnlink = fs.unlinkSync,
+    newLockToken = randomUUID,
+  } = deps;
+  const claim = `${lock}.reclaim-${process.pid}-${newLockToken()}`;
+  try {
+    lockLink(lock, claim);
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return false;
+    throw error;
+  }
+  try {
+    // The claim pins the observed inode. Two links means only the main path and this
+    // reclaimer refer to it, so another reclaimer cannot act on the same observation.
+    const owner = readLockOwner(claim, deps);
+    if (isLockOwnerAlive(owner, deps)) return false;
+    let claimStat;
+    let currentStat;
+    try {
+      claimStat = lockStat(claim);
+      currentStat = lockStat(lock);
+    } catch (error) {
+      if (error && error.code === 'ENOENT') return false;
+      throw error;
+    }
+    if (claimStat.dev !== currentStat.dev || claimStat.ino !== currentStat.ino
+        || claimStat.nlink !== 2 || currentStat.nlink !== 2) return false;
+    lockUnlink(lock);
+    return true;
+  } finally {
+    try { lockUnlink(claim); } catch (error) {
+      if (!error || error.code !== 'ENOENT') throw error;
+    }
+  }
+}
+
 function acquireOwnedLock(lock, deadline, deps) {
-  const { now = Date.now, wait = sleepSync, lockUnlink = fs.unlinkSync } = deps;
+  const { now = Date.now, wait = sleepSync } = deps;
   while (true) {
+    cleanupAbandonedReclaims(lock, deps);
     try {
       return createOwnedLock(lock, deps);
     } catch (error) {
@@ -93,18 +156,9 @@ function acquireOwnedLock(lock, deadline, deps) {
 
     const owner = readLockOwner(lock, deps);
     if (!isLockOwnerAlive(owner, deps)) {
-      const reclaim = `${lock}.reclaim`;
-      const reclaimOwner = acquireOwnedLock(reclaim, deadline, deps);
-      try {
-        const current = readLockOwner(lock, deps);
-        if (!isLockOwnerAlive(current, deps)) {
-          try { lockUnlink(lock); } catch (error) {
-            if (!error || error.code !== 'ENOENT') throw error;
-          }
-        }
-      } finally {
-        releaseOwnedLock(reclaim, reclaimOwner, deps);
-      }
+      if (reclaimAbandonedLock(lock, deps)) continue;
+      if (now() >= deadline) throw new Error(`session record lock timed out: ${lock}`);
+      wait(LOCK_RETRY_MS);
       continue;
     }
 
