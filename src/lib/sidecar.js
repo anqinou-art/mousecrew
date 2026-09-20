@@ -30,6 +30,9 @@ const DEFAULTS = {
   forcedGraceMs: core.DEFAULT_FORCED_GRACE_MS,
   draftQuietMs: inputDraft.DEFAULT_DRAFT_QUIET_MS,
   forcedDraftHoldMs: inputDraft.DEFAULT_FORCED_DRAFT_HOLD_MS,
+  wakeDir: null,
+  wakeMaxContent: core.DEFAULT_WAKE_MAX_CONTENT,
+  wakeSettleMs: core.DEFAULT_WAKE_SETTLE_MS,
   screenLines: 12,
   busyPattern: 'esc to interrupt',
 };
@@ -143,19 +146,160 @@ class Sidecar extends EventEmitter {
     return { agent, dmId: event.dmId };
   }
 
-  queue(item) {
+  _appendQueue(item) {
     const entry = { ...item, queuedAt: new Date(this.now()).toISOString() };
     this.state.pending.push(entry);
     const { kept, dropped } = core.capPending(this.state.pending, this.opt.maxPending);
     this.state.pending = kept;
-    for (const d of dropped) {
-      this.emit('event', {
-        type: 'dropped-overflow', agent: d.agent, kind: d.kind, count: this._itemCount(d),
-      });
-      this._queueAcksFor(d, 'expired');
-    }
+    return { entry, dropped };
+  }
+
+  _emitOverflow(item) {
+    this.emit('event', {
+      type: 'dropped-overflow', agent: item.agent, kind: item.kind, count: this._itemCount(item),
+    });
+  }
+
+  _emitQueued(entry) {
     this.emit('event', { type: 'queued', agent: entry.agent, kind: entry.kind, depth: this.state.pending.length });
-    return entry;
+  }
+
+  queue(item) {
+    const staged = this._appendQueue(item);
+    for (const dropped of staged.dropped) {
+      this._emitOverflow(dropped);
+      this._queueAcksFor(dropped, 'expired');
+    }
+    this._emitQueued(staged.entry);
+    return staged.entry;
+  }
+
+  _queueWake(request) {
+    if (this.state.seen.includes(request.key)) return null;
+    const snapshot = {
+      seen: this.state.seen.slice(),
+      pending: this.state.pending.slice(),
+      acks: this.state.acks.slice(),
+    };
+    this._seen(request.key);
+    const staged = this._appendQueue({
+      agent: request.agent,
+      kind: 'wake',
+      sender: request.sender,
+      content: request.content,
+      sourceKey: request.key,
+    });
+    for (const dropped of staged.dropped) this._appendAcksFor(dropped, 'expired');
+    if (!this._saveState()) {
+      this.state.seen = snapshot.seen;
+      this.state.pending = snapshot.pending;
+      this.state.acks = snapshot.acks;
+      throw new Error('wake queue state was not persisted');
+    }
+    for (const dropped of staged.dropped) this._emitOverflow(dropped);
+    this._emitQueued(staged.entry);
+    return staged.entry;
+  }
+
+  ingestWakeDir({ now = this.now() } = {}) {
+    const result = { queued: 0, rejected: 0, deferred: 0, failed: 0, merged: 0 };
+    const dir = this.opt.wakeDir;
+    if (!dir) return result;
+    const failed = (file, action, error) => {
+      result.failed += 1;
+      this.emit('event', {
+        type: 'wake-file-failed', file, action,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    };
+    try {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      fs.chmodSync(dir, 0o700);
+    } catch (error) {
+      failed(dir, 'open-directory', error);
+      return result;
+    }
+
+    let names;
+    try { names = fs.readdirSync(dir).filter((name) => name.endsWith('.json')).sort(); }
+    catch (error) {
+      failed(dir, 'read-directory', error);
+      return result;
+    }
+
+    const remove = (file, name) => {
+      try { fs.unlinkSync(file); return true; }
+      catch (error) { failed(name, 'delete-source', error); return false; }
+    };
+    for (const name of names) {
+      const file = path.join(dir, name);
+      try {
+        let raw;
+        let mtimeMs;
+        try {
+          raw = fs.readFileSync(file, 'utf8');
+          mtimeMs = fs.statSync(file).mtimeMs;
+        } catch (error) {
+          failed(name, 'read-source', error);
+          continue;
+        }
+        const request = core.parseWakeRequest(raw, {
+          identity: this.identity,
+          terminalIds: this.terminalIds,
+          maxContent: this.opt.wakeMaxContent,
+        });
+        if (request.error) {
+          if (request.notJson && now - mtimeMs < this.opt.wakeSettleMs) {
+            result.deferred += 1;
+            continue;
+          }
+          result.rejected += 1;
+          this.emit('event', { type: 'wake-rejected', file: name, reason: request.error });
+          remove(file, name);
+          continue;
+        }
+        if (core.hasPendingWake(
+          request.agent, request.sender, this.state.pending, now,
+          this.opt.stalePendingMs, this.opt.forcedGraceMs,
+        )) {
+          if (!this.state.seen.includes(request.key)) {
+            const seen = this.state.seen.slice();
+            this._seen(request.key);
+            if (!this._saveState()) {
+              this.state.seen = seen;
+              failed(name, 'persist-merge', new Error('wake merge was not persisted'));
+              continue;
+            }
+          }
+          if (!remove(file, name)) continue;
+          result.merged += 1;
+          this.emit('event', {
+            type: 'wake-merged', file: name, agent: request.agent,
+            sender: request.sender, key: request.key,
+          });
+          continue;
+        }
+        let entry;
+        try { entry = this._queueWake(request); }
+        catch (error) {
+          failed(name, 'persist-queue', error);
+          continue;
+        }
+        if (!remove(file, name)) continue;
+        if (entry) {
+          result.queued += 1;
+          this.emit('event', {
+            type: 'wake-queued', file: name, agent: request.agent,
+            sender: request.sender, key: request.key,
+          });
+        } else {
+          this.emit('event', { type: 'wake-duplicate', file: name, key: request.key });
+        }
+      } catch (error) {
+        failed(name, 'process-source', error);
+      }
+    }
+    return result;
   }
 
   // ---------- delivery ----------
@@ -165,10 +309,17 @@ class Sidecar extends EventEmitter {
   }
 
   _queueAcksFor(item, status) {
+    const appended = this._appendAcksFor(item, status);
+    if (appended) this._saveState();
+  }
+
+  _appendAcksFor(item, status) {
     if (!item || item.kind !== 'dm') return;
+    let appended = 0;
     for (const source of item.mergedFrom || [item]) {
-      if (source.dmId) this._queueAck(source.dmId, item.agent, status);
+      if (source.dmId && this._appendAck(source.dmId, item.agent, status)) appended += 1;
     }
+    return appended;
   }
 
   _markDraftHeld(agent, held) {
@@ -253,13 +404,17 @@ class Sidecar extends EventEmitter {
    * decoration.
    */
   _queueAck(dmId, agent, status) {
+    if (this._appendAck(dmId, agent, status)) this._saveState();
+  }
+
+  _appendAck(dmId, agent, status) {
     if (!this.client.ack) return;
     this.state.acks.push({ dmId, agent, status, queuedAt: new Date(this.now()).toISOString() });
     if (this.state.acks.length > 500) {
       const dropped = this.state.acks.shift();
       this.emit('event', { type: 'ack-overflow', dmId: dropped.dmId });
     }
-    this._saveState();
+    return true;
   }
 
   /** Send whatever receipts are owed. Anything that fails stays owed. */
@@ -308,6 +463,12 @@ class Sidecar extends EventEmitter {
    * free, type the oldest item in.
    */
   async deliver() {
+    if (this.opt.wakeDir) {
+      try { this.ingestWakeDir(); }
+      catch (error) {
+        this.emit('event', { type: 'wake-file-failed', file: this.opt.wakeDir, action: 'scan', error: error.message });
+      }
+    }
     // Receipts owed from earlier passes go out first: a delivery attempt is the only thing
     // that runs on a timer here, so it is also the retry loop.
     await this.flushAcks();

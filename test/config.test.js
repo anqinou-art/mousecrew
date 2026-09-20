@@ -122,6 +122,9 @@ test('delivery batching config has defaults and refuses invalid types at startup
     forcedGraceMs: 120000,
     draftQuietMs: 120000,
     forcedDraftHoldMs: 90000,
+    wakeDir: null,
+    wakeMaxContent: 600,
+    wakeSettleMs: 5000,
   });
   for (const [delivery, expected] of [
     [{ batchGroup: 'yes' }, /delivery\.batchGroup must be a boolean/],
@@ -130,11 +133,28 @@ test('delivery batching config has defaults and refuses invalid types at startup
     [{ forcedGraceMs: 0 }, /delivery\.forcedGraceMs must be a positive integer/],
     [{ draftQuietMs: 0 }, /delivery\.draftQuietMs must be a positive integer/],
     [{ forcedDraftHoldMs: -1 }, /delivery\.forcedDraftHoldMs must be a non-negative integer/],
+    [{ wakeDir: '' }, /delivery\.wakeDir must be a non-empty path/],
+    [{ wakeMaxContent: 0 }, /delivery\.wakeMaxContent must be a positive integer/],
+    [{ wakeSettleMs: -1 }, /delivery\.wakeSettleMs must be a non-negative integer/],
   ]) {
     const configFile = path.join(dir, `config-${Object.keys(delivery)[0]}.json`);
     fs.writeFileSync(configFile, JSON.stringify({ delivery }));
     assert.throws(() => load({ configFile, agentsFile, root: dir }), expected);
   }
+});
+
+test('a configured wake directory is resolved from the config root', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-wake-path-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const configFile = path.join(dir, 'config.json');
+  const agentsFile = path.join(dir, 'agents.json');
+  fs.writeFileSync(configFile, JSON.stringify({ delivery: { wakeDir: './state/wake' } }));
+  fs.writeFileSync(agentsFile, JSON.stringify({
+    agents: [{ id: 'worker', transport: 'terminal', terminal: { adapter: 'fake' } }],
+  }));
+
+  assert.equal(load({ configFile, agentsFile, root: dir }).config.delivery.wakeDir,
+    path.join(dir, 'state', 'wake'));
 });
 
 test('draft hold timing only constrains rosters that enable input-box detection', (t) => {

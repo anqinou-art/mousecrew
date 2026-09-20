@@ -16,6 +16,8 @@ const DEFAULT_BATCH_GROUP = true;
 const DEFAULT_INLINE_LIMIT = 600;
 const DEFAULT_FORCE_ON_EXPIRY = true;
 const DEFAULT_FORCED_GRACE_MS = 2 * 60 * 1000;
+const DEFAULT_WAKE_MAX_CONTENT = 600;
+const DEFAULT_WAKE_SETTLE_MS = 5 * 1000;
 
 // The separator is a NUL byte, written as an escape on purpose: a literal one in the
 // source makes git treat this whole file as binary, and `git diff` then answers
@@ -45,6 +47,36 @@ function normalizeMessage(row) {
 function messageKey(row) {
   const m = normalizeMessage(row);
   return fingerprint(m.ts, m.sender, m.content);
+}
+
+function parseWakeRequest(raw, {
+  identity, terminalIds = [], maxContent = DEFAULT_WAKE_MAX_CONTENT,
+} = {}) {
+  let body;
+  try { body = JSON.parse(String(raw)); }
+  catch (error) { return { error: `not valid JSON (${error.message})`, notJson: true }; }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { error: 'top level must be an object' };
+  }
+  if (typeof body.agent !== 'string') {
+    const type = Array.isArray(body.agent) ? 'array' : typeof body.agent;
+    return { error: `agent must be a string, got ${type}` };
+  }
+  const agent = identity && identity.normalizeAgentId(body.agent.trim());
+  if (!agent || !terminalIds.includes(agent)) {
+    return { error: `agent is not a terminal agent: ${JSON.stringify(body.agent)}` };
+  }
+  const key = typeof body.key === 'string' ? body.key.trim() : '';
+  if (!key) return { error: 'key is required' };
+  const content = typeof body.content === 'string' ? body.content.trim() : '';
+  if (!content) return { error: 'content is required' };
+  if (content.length > maxContent) {
+    return { error: `content length ${content.length} exceeds ${maxContent}` };
+  }
+  const sender = typeof body.sender === 'string' && body.sender.trim()
+    ? body.sender.trim()
+    : 'local';
+  return { agent, sender, content, key: `wake:${key}` };
 }
 
 /**
@@ -130,6 +162,7 @@ function capPending(pending, max = 200) {
  * thread while the reply appears in front of the whole crew.
  */
 function envelope({ kind, agent, sender, content, cli = 'mousecrew' }) {
+  if (kind === 'wake') return `[local wake · ${sender}] ${content}`;
   if (kind === 'dm') {
     return `[direct] ${sender}: ${content}\n  — reply with: ${cli} reply --as ${agent} "..."`;
   }
@@ -178,6 +211,7 @@ function batchEnvelope({ items, agent, cli = 'mousecrew', bodyFile = null, inlin
   const rendered = bodyFile
     ? `${body.slice(0, inlineLimit)}\n\n[truncated — read the full message before replying: ${bodyFile}]`
     : body;
+  if (item.kind === 'wake') return `[local wake · ${item.sender}] ${rendered}`;
   const heading = batch.length === 1
     ? `[${item.kind === 'dm' ? 'direct' : 'group'}] ${item.sender}: `
     : `[group batch] ${batch.length} messages delivered together\n`;
@@ -192,7 +226,7 @@ function mergeDmBodies(items) {
 
 function markForcedDeliveries(items, now = Date.now(), busy = false) {
   const candidates = (Array.isArray(items) ? items : [])
-    .filter((item) => item && !item.forcedAt && (busy || item.draftHeldAt));
+    .filter((item) => item && item.kind !== 'wake' && !item.forcedAt && (busy || item.draftHeldAt));
   const forcedAt = new Date(now).toISOString();
   const forced = [];
   const absorbed = [];
@@ -217,6 +251,12 @@ function markForcedDeliveries(items, now = Date.now(), busy = false) {
     }
   }
   return { forced, absorbed };
+}
+
+function hasPendingWake(agent, sender, pending, now = Date.now(), ttlMs = 10 * 60 * 1000,
+  forcedGraceMs = DEFAULT_FORCED_GRACE_MS) {
+  return filterFresh(Array.isArray(pending) ? pending : [], now, ttlMs, forcedGraceMs)
+    .some((item) => item && item.kind === 'wake' && item.agent === agent && item.sender === sender);
 }
 
 function planDelivery(item, busy) {
@@ -244,9 +284,10 @@ function resolveWindow(windows, identityName) {
 module.exports = {
   DEFAULT_BATCH_GROUP, DEFAULT_INLINE_LIMIT,
   DEFAULT_FORCE_ON_EXPIRY, DEFAULT_FORCED_GRACE_MS,
-  fingerprint, normalizeMessage, messageKey,
+  DEFAULT_WAKE_MAX_CONTENT, DEFAULT_WAKE_SETTLE_MS,
+  fingerprint, normalizeMessage, messageKey, parseWakeRequest,
   mentionTargets, isBusy,
   filterFresh, selectExpired, capPending,
   envelope, nextDeliverableBatch, batchBody, batchEnvelope,
-  mergeDmBodies, markForcedDeliveries, planDelivery, resolveWindow,
+  mergeDmBodies, markForcedDeliveries, hasPendingWake, planDelivery, resolveWindow,
 };

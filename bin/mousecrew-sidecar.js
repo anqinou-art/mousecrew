@@ -89,6 +89,9 @@ const sidecar = new Sidecar({
   forcedGraceMs: config.delivery.forcedGraceMs,
   draftQuietMs: config.delivery.draftQuietMs,
   forcedDraftHoldMs: config.delivery.forcedDraftHoldMs,
+  wakeDir: config.delivery.wakeDir,
+  wakeMaxContent: config.delivery.wakeMaxContent,
+  wakeSettleMs: config.delivery.wakeSettleMs,
 });
 
 // Log every structured event. These are the same events the tests assert against, so what

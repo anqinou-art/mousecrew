@@ -44,7 +44,10 @@
     "forceOnExpiry": true,
     "forcedGraceMs": 120000,
     "draftQuietMs": 120000,
-    "forcedDraftHoldMs": 90000
+    "forcedDraftHoldMs": 90000,
+    "wakeDir": null,
+    "wakeMaxContent": 600,
+    "wakeSettleMs": 5000
   },
 
   "// contextWatch": "Warn an agent when its context window is close to full.",
