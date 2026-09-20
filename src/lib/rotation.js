@@ -5,8 +5,7 @@ const { execFileSync } = require('child_process');
 const TAIL_BYTES = 128 * 1024;
 
 function safePart(value) {
-  const text = String(value || 'unknown');
-  return /^[A-Za-z0-9_-]+$/.test(text) ? text : `id-${Buffer.from(text).toString('base64url')}`;
+  return `id-${Buffer.from(JSON.stringify(String(value)), 'utf8').toString('base64url')}`;
 }
 
 function sessionDirectory(config) {
@@ -150,8 +149,10 @@ function rotateKey(agent, sessionId, now = new Date()) {
 
 function rotateSourceState(item, currentRef, currentRecord) {
   if (!item || item.kind !== 'rotate') return 'match';
-  const ref = currentRef && item.rotateWindowRef
-    ? (currentRef === item.rotateWindowRef ? 'match' : 'stale')
+  const recordRef = currentRecord && currentRecord.windowRef;
+  const refs = [item.rotateWindowRef, currentRef, recordRef];
+  const ref = refs.every(Boolean)
+    ? (new Set(refs).size === 1 ? 'match' : 'stale')
     : 'unknown';
   const sessionId = currentRecord && currentRecord.sessionId;
   const session = sessionId && item.rotateSessionId

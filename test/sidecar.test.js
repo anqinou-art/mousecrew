@@ -272,6 +272,92 @@ test('rotation measures only the current window and rechecks window plus session
   assert.equal(unknown.adapter.__test.sentTo('%1').length, 0);
 });
 
+test('rotation re-resolves both the record window and claimed target after the screen read', async () => {
+  const crew = [normalizeAgent({
+    id: 'architect', displayName: 'lead', transport: 'terminal',
+    terminal: { adapter: 'fake', target: 'lead', rotation: { kind: 'tokens', limit: 1 } },
+  })];
+  const prepare = async ({ move = false, updateRecord = false } = {}) => {
+    const h = harness({
+      crew,
+      windows: [
+        { ref: '%1', identity: 'lead', screen: '> ' },
+        { ref: '%2', identity: null, screen: '> ' },
+      ],
+    });
+    const transcript = path.join(h.dir, 'session.jsonl');
+    fs.writeFileSync(transcript, JSON.stringify({ usage: { input_tokens: 10 } }) + '\n');
+    const record = {
+      agent: 'architect', windowRef: '%1', sessionId: 'same-session',
+      transcriptPath: transcript, recordedAt: new Date(0).toISOString(),
+    };
+    rotation.writeSessionRecord(h.sc.sessionDir, record);
+    await h.sc.tickRotation();
+    if (move) {
+      const readScreen = h.adapter.readScreen.bind(h.adapter);
+      h.adapter.readScreen = async (...args) => {
+        const screen = await readScreen(...args);
+        await h.adapter.clearIdentity('%1');
+        await h.adapter.setIdentity('%2', 'lead');
+        if (updateRecord) {
+          rotation.writeSessionRecord(h.sc.sessionDir, { ...record, windowRef: '%2' });
+        }
+        return screen;
+      };
+    }
+    return h;
+  };
+
+  for (const updateRecord of [false, true]) {
+    const moved = await prepare({ move: true, updateRecord });
+    await moved.sc.deliver();
+    assert.equal(moved.of('rotation-stale').length, 1);
+    assert.equal(moved.adapter.__test.sentTo('%1').length, 0);
+    assert.equal(moved.adapter.__test.sentTo('%2').length, 0);
+  }
+
+  const stable = await prepare();
+  await stable.sc.deliver();
+  assert.equal(stable.of('rotation-stale').length, 0);
+  assert.equal(stable.adapter.__test.sentTo('%1').length, 1);
+});
+
+test('an unknown rotation reminder stays queued without blocking ordinary direct or group delivery', async () => {
+  const crew = [normalizeAgent({
+    id: 'architect', displayName: 'lead', transport: 'terminal',
+    terminal: { adapter: 'fake', target: 'lead', rotation: { kind: 'tokens', limit: 1 } },
+  })];
+  const h = primed(harness({ crew, windows: [{ ref: '%1', identity: 'lead', screen: '> ' }] }));
+  const transcript = path.join(h.dir, 'session.jsonl');
+  fs.writeFileSync(transcript, JSON.stringify({ usage: { input_tokens: 10 } }) + '\n');
+  rotation.writeSessionRecord(h.sc.sessionDir, {
+    agent: 'architect', windowRef: '%1', sessionId: 'session-a',
+    transcriptPath: transcript, recordedAt: new Date(0).toISOString(),
+  });
+  await h.sc.tickRotation();
+  fs.unlinkSync(rotation.sessionRecordPath(h.sc.sessionDir, 'architect'));
+  h.sc.ingestDirect({
+    target: 'architect', dmId: 'dm-after-rotate', sender: 'human', content: 'direct work',
+  });
+  h.sc.ingest([msg('human', '@lead group work')], 'sse');
+
+  await h.sc.deliver();
+  await h.sc.deliver();
+
+  const sent = h.adapter.__test.sentTo('%1');
+  assert.equal(sent.length, 2);
+  assert.match(sent[0], /\[direct\].*direct work/s);
+  assert.match(sent[1], /\[group\].*group work/s);
+  assert.deepEqual(h.acks, [{
+    agent: 'architect', dmId: 'dm-after-rotate', status: 'delivered',
+  }]);
+  assert.deepEqual(h.sc.state.pending.map((item) => item.kind), ['rotate']);
+  h.advance(11 * 60_000);
+  await h.sc.deliver();
+  assert.deepEqual(h.sc.state.pending.map((item) => item.kind), ['rotate']);
+  assert.equal(h.adapter.__test.sentTo('%1').length, 2);
+});
+
 test('changing input text holds delivery and persists the marker with one screen read', async () => {
   const h = primed(harness({
     windows: [{ ref: '%1', identity: 'lead', screen: inputScreen('half a sentence') }],

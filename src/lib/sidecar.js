@@ -567,17 +567,6 @@ class Sidecar extends EventEmitter {
         continue;
       }
 
-      const head = this.state.pending.find((item) => item.agent === agent);
-      const initialRotationSource = this._rotationSource(head, found.ref);
-      if (initialRotationSource === 'stale') {
-        this._discardStaleRotation(head, found.ref);
-        continue;
-      }
-      if (initialRotationSource === 'unknown') {
-        this.emit('event', { type: 'rotation-held', agent, ref: found.ref });
-        continue;
-      }
-
       const pattern = (cfg && cfg.terminal && cfg.terminal.busyPattern) || this.opt.busyPattern;
       let screen = '';
       try { screen = await this.adapter.readScreen(found.ref, this.opt.screenLines); }
@@ -603,7 +592,24 @@ class Sidecar extends EventEmitter {
       // Keep prior hold evidence until expiry has awarded any forced delivery it earned.
       // Once that decision is made, a released gate clears the marker on survivors.
       if (!busy && draft && !draft.hold) this._markDraftHeld(agent, false);
-      const batch = core.nextDeliverableBatch(this.state.pending, agent, this.opt.batchGroup);
+
+      // Missing rotation evidence freezes that reminder, not unrelated work behind it.
+      const heldRotations = new Set();
+      for (const candidate of this.state.pending.filter((entry) => (
+        entry.agent === agent && entry.kind === 'rotate'
+      ))) {
+        const source = this._rotationSource(candidate, found.ref);
+        if (source === 'stale') {
+          this._discardStaleRotation(candidate, found.ref);
+        } else if (source === 'unknown') {
+          heldRotations.add(candidate);
+          this.emit('event', { type: 'rotation-held', agent, ref: found.ref });
+        }
+      }
+      const eligible = heldRotations.size
+        ? this.state.pending.filter((entry) => !heldRotations.has(entry))
+        : this.state.pending;
+      const batch = core.nextDeliverableBatch(eligible, agent, this.opt.batchGroup);
       const item = batch[0];
       if (!item) continue;
       const plan = core.planDelivery(item, busy);
@@ -629,16 +635,28 @@ class Sidecar extends EventEmitter {
 
       this._draining.add(agent);
       try {
+        let deliveryRef = found.ref;
         if (item.kind === 'rotate') {
-          const source = this._rotationSource(item, found.ref);
+          let latest;
+          try {
+            // readScreen awaited above; the identity may have moved while it was in flight.
+            latest = core.resolveWindow(await this.adapter.listWindows(), identityName);
+          } catch (error) {
+            this.emit('event', {
+              type: 'rotation-held', agent, ref: found.ref, error: error.message,
+            });
+            continue;
+          }
+          const source = this._rotationSource(item, latest.ref);
           if (source === 'stale') {
-            this._discardStaleRotation(item, found.ref);
+            this._discardStaleRotation(item, latest.ref);
             continue;
           }
           if (source === 'unknown') {
-            this.emit('event', { type: 'rotation-held', agent, ref: found.ref });
+            this.emit('event', { type: 'rotation-held', agent, ref: latest.ref });
             continue;
           }
+          deliveryRef = latest.ref;
         }
         if (forced) {
           const triedAt = new Date(this.now()).toISOString();
@@ -659,16 +677,16 @@ class Sidecar extends EventEmitter {
             bodyFile, inlineLimit: this.opt.inlineLimit,
           })
           : fullText;
-        await this.adapter.sendText(found.ref, text);
+        await this.adapter.sendText(deliveryRef, text);
         await new Promise((r) => setTimeout(r, this.opt.postInjectMs));
-        await this.adapter.sendKey(found.ref, 'enter');
+        await this.adapter.sendKey(deliveryRef, 'enter');
 
         const deliveredBatch = new Set(batch);
         this.state.pending = this.state.pending.filter((p) => !deliveredBatch.has(p));
         this._saveState();
         const count = batch.reduce((sum, entry) => sum + this._itemCount(entry), 0);
         this.emit('event', {
-          type: forced ? 'forced-injected' : 'injected', agent, ref: found.ref, kind: item.kind,
+          type: forced ? 'forced-injected' : 'injected', agent, ref: deliveryRef, kind: item.kind,
           chars: text.length, count, forced,
         });
         for (const entry of batch) this._queueAcksFor(entry, 'delivered');

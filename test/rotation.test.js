@@ -98,9 +98,19 @@ test('session records are private, replace the previous session, and invalidate 
 
 test('rotation source requires the same window and session, and the reminder names the handoff and manual action', () => {
   const item = { kind: 'rotate', rotateWindowRef: '%1', rotateSessionId: 'session-a' };
-  assert.equal(rotation.rotateSourceState(item, '%1', { sessionId: 'session-a' }), 'match');
-  assert.equal(rotation.rotateSourceState(item, '%2', { sessionId: 'session-a' }), 'stale');
-  assert.equal(rotation.rotateSourceState(item, '%1', { sessionId: 'session-b' }), 'stale');
+  assert.equal(rotation.rotateSourceState(item, '%1', {
+    windowRef: '%1', sessionId: 'session-a',
+  }), 'match');
+  assert.equal(rotation.rotateSourceState(item, '%2', {
+    windowRef: '%2', sessionId: 'session-a',
+  }), 'stale');
+  assert.equal(rotation.rotateSourceState(item, '%1', {
+    windowRef: '%2', sessionId: 'session-a',
+  }), 'stale');
+  assert.equal(rotation.rotateSourceState(item, '%1', {
+    windowRef: '%1', sessionId: 'session-b',
+  }), 'stale');
+  assert.equal(rotation.rotateSourceState(item, '%1', { sessionId: 'session-a' }), 'unknown');
   assert.equal(rotation.rotateSourceState(item, '%1', null), 'unknown');
   assert.equal(rotation.rotateSourceState({ kind: 'group' }, null, null), 'match');
 
