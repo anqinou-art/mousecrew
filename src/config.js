@@ -14,6 +14,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { normalizeVerifyRepos, normalizeDeployTrees } = require('./lib/commit-verify');
 
 function expandTilde(p) {
   if (typeof p !== 'string') return p;
@@ -49,6 +50,8 @@ const DEFAULTS = {
   archivePath: './data/group-archive.jsonl',
   tokenFile: '~/.config/mousecrew/auth.json',
   projects: [],
+  verifyRepos: {},
+  deployTrees: {},
   nudge: {
     enabled: true,
     scanMs: 300000,
@@ -114,6 +117,7 @@ function validateAgents(agents) {
 
   const ids = new Set();
   const triggers = new Map();   // lowercased trigger -> agent id
+  const localWorkDirs = new Map();
 
   for (const a of agents) {
     const where = `agent "${a.id || '(no id)'}"`;
@@ -134,6 +138,14 @@ function validateAgents(agents) {
         errors.push(`${where}: runner "exec" needs exec.command`);
       }
       if (!a.workDir) errors.push(`${where}: local agents need a workDir`);
+      if (a.workDir) {
+        const resolved = path.resolve(expandTilde(a.workDir));
+        if (localWorkDirs.has(resolved)) {
+          errors.push(`${where}: workDir resolves to the same path as agent "${localWorkDirs.get(resolved)}" (${resolved})`);
+        } else {
+          localWorkDirs.set(resolved, a.id);
+        }
+      }
     }
     if (transport === 'terminal' && !(a.terminal && a.terminal.adapter)) {
       errors.push(`${where}: terminal agents need terminal.adapter (e.g. "tmux")`);
@@ -215,6 +227,8 @@ function load({ configFile, agentsFile, root } = {}) {
   cfg.archivePath = path.resolve(base, expandTilde(cfg.archivePath));
   cfg.tokenFile = expandTilde(cfg.tokenFile);
   cfg.contextWatch.handoffDir = path.resolve(base, expandTilde(cfg.contextWatch.handoffDir));
+  cfg.verifyRepos = normalizeVerifyRepos(cfg.verifyRepos, base);
+  cfg.deployTrees = normalizeDeployTrees(cfg.deployTrees, base);
 
   const projectConfig = validateProjects(cfg.projects);
   if (projectConfig.errors.length) {

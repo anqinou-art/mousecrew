@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const http = require('http');
+const { execFileSync } = require('child_process');
 const Database = require('better-sqlite3');
 const { build } = require('../src/server');
 const { normalizeAgent } = require('../src/config');
@@ -89,6 +90,22 @@ async function boot(t, crew = CREW, configOverrides = {}) {
 /** Create an order and put it in a given state without going through the guarded routes. */
 function place(ctx, id, status) {
   ctx.store.db.prepare('UPDATE work_orders SET status = ? WHERE id = ?').run(status, id);
+}
+
+function git(dir, ...args) {
+  return execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
+}
+
+function makeRepo(t, name) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `mousecrew-${name}-`));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  git(dir, 'init', '-q', '-b', 'main');
+  git(dir, 'config', 'user.email', 'test@example.com');
+  git(dir, 'config', 'user.name', 'test');
+  fs.writeFileSync(path.join(dir, `${name}.txt`), name);
+  git(dir, 'add', '.');
+  git(dir, 'commit', '-q', '-m', `add ${name}`);
+  return { dir, commit: git(dir, 'rev-parse', 'HEAD') };
 }
 
 async function newOrder(call, { assignee, repo, project_id, title = 'a task' }) {
@@ -438,6 +455,89 @@ test('a working agent cannot wipe the restart queue', async (t) => {
   const byHuman = await call('POST', '/api/orders/restart-done', { actor: 'ops-person' });
   assert.equal(byHuman.status, 200);
   assert.deepEqual(byHuman.body.closed, [id]);
+  assert.deepEqual(byHuman.body.unchecked, [id]);
+  assert.deepEqual(byHuman.body.no_commit, [id]);
+});
+
+test('submission verification selects clones by the order repo', async (t) => {
+  const serverRepo = makeRepo(t, 'server');
+  const appRepo = makeRepo(t, 'app');
+  git(serverRepo.dir, 'update-ref', 'refs/remotes/origin/main', serverRepo.commit);
+  git(appRepo.dir, 'update-ref', 'refs/remotes/origin/main', appRepo.commit);
+  const { call, ctx } = await boot(t, CREW, {
+    verifyRepos: { server: [serverRepo.dir], app: [appRepo.dir], desktop: [] },
+  });
+
+  const server = await newOrder(call, { repo: 'server' });
+  place(ctx, server, 'in_progress');
+  const verified = await call('POST', `/api/orders/${server}/transition`, {
+    to_status: 'submitted', actor: 'human', commit_hash: serverRepo.commit,
+  });
+  assert.equal(verified.body.commit_verify.verified, true);
+  assert.equal(verified.body.commit_verify.repo, serverRepo.dir);
+
+  const app = await newOrder(call, { repo: 'app' });
+  place(ctx, app, 'in_progress');
+  const wrongRepo = await call('POST', `/api/orders/${app}/transition`, {
+    to_status: 'submitted', actor: 'human', commit_hash: serverRepo.commit,
+  });
+  assert.equal(wrongRepo.body.commit_verify.reason, 'commit-not-found-locally');
+
+  for (const [repo, reason] of [
+    ['unknown', 'no-repos-configured'],
+    ['desktop', 'repo-not-cloned-on-this-machine'],
+  ]) {
+    const id = await newOrder(call, { repo });
+    place(ctx, id, 'in_progress');
+    const result = await call('POST', `/api/orders/${id}/transition`, {
+      to_status: 'submitted', actor: 'human', commit_hash: serverRepo.commit,
+    });
+    assert.equal(result.body.commit_verify.reason, reason);
+  }
+});
+
+test('restart-done closes eligible named orders and leaves failed or unnamed work alone', async (t) => {
+  const deployed = makeRepo(t, 'deployed');
+  const elsewhere = makeRepo(t, 'elsewhere');
+  const { call, ctx } = await boot(t, CREW, { deployTrees: { server: deployed.dir } });
+
+  const good = await newOrder(call, { repo: 'server' });
+  const bad = await newOrder(call, { repo: 'server' });
+  const noCommit = await newOrder(call, { repo: 'server' });
+  const unnamed = await newOrder(call, { repo: 'server' });
+  for (const id of [good, bad, noCommit, unnamed]) place(ctx, id, 'pending_restart');
+  ctx.store.order.setCommitFields.run(deployed.commit, null, null, good);
+  ctx.store.order.setCommitFields.run(elsewhere.commit, null, null, bad);
+  ctx.store.order.setCommitFields.run(deployed.commit, null, null, unnamed);
+
+  const result = await call('POST', '/api/orders/restart-done', {
+    actor: 'ops-person', ids: [good, bad, noCommit],
+  });
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.closed.sort(), [good, noCommit].sort());
+  assert.deepEqual(result.body.skipped, [{ id: bad, reason: 'commit-not-in-deploy-tree' }]);
+  assert.deepEqual(result.body.unchecked, []);
+  assert.deepEqual(result.body.no_commit, [noCommit]);
+  assert.equal((await call('GET', `/api/orders/${bad}`)).body.status, 'pending_restart');
+  assert.equal((await call('GET', `/api/orders/${unnamed}`)).body.status, 'pending_restart');
+});
+
+test('an invalid deployment tree fails closed for every order in that repo', async (t) => {
+  const notGit = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-not-git-'));
+  t.after(() => fs.rmSync(notGit, { recursive: true, force: true }));
+  const { call, ctx } = await boot(t, CREW, { deployTrees: { server: notGit } });
+  const first = await newOrder(call, { repo: 'server' });
+  const second = await newOrder(call, { repo: 'server' });
+  for (const id of [first, second]) {
+    place(ctx, id, 'pending_restart');
+    ctx.store.order.setCommitFields.run('a'.repeat(40), null, null, id);
+  }
+
+  const result = await call('POST', '/api/orders/restart-done', { actor: 'ops-person' });
+  assert.deepEqual(result.body.closed, []);
+  assert.deepEqual(result.body.skipped, [first, second].map((id) => ({ id, reason: 'invalid-deploy-tree' })));
+  assert.equal((await call('GET', `/api/orders/${first}`)).body.status, 'pending_restart');
+  assert.equal((await call('GET', `/api/orders/${second}`)).body.status, 'pending_restart');
 });
 
 // ---------- the rest of the lane ----------

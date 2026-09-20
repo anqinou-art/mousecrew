@@ -13,6 +13,17 @@
     { "id": "docs", "name": "Documentation", "prefix": "DOC" }
   ],
 
+  "// verifyRepos": "Repo name to local read-only clones used to verify submitted commits. An empty list explicitly means this machine has no clone.",
+  "verifyRepos": {
+    "server": ["~/worktrees/server-dev", "~/worktrees/server-audit"],
+    "desktop": []
+  },
+
+  "// deployTrees": "Optional repo name to the git tree that actually runs in production. restart-done verifies recorded commits against its HEAD.",
+  "deployTrees": {
+    "server": "~/services/server"
+  },
+
   "// nudge": "Chase whoever currently owes an action on an open order.",
   "nudge": {
     "enabled": true,

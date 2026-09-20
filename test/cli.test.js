@@ -201,3 +201,19 @@ test('unfreeze requires an actor and reason, and show calls out the frozen snaps
   assert.equal(shown.code, 0, shown.stderr);
   assert.match(shown.stdout, /frozen at rev 3 \(commit abc123\)/);
 });
+
+test('restart-done passes named ids through and exits nonzero when any order is skipped', async (t) => {
+  const api = await scriptedApi(t, [{ body: {
+    closed: ['WO-001'],
+    skipped: [{ id: 'WO-002', reason: 'commit-not-in-deploy-tree' }],
+    unchecked: ['WO-001'],
+    no_commit: [],
+  } }]);
+  const result = await runCli(['restart-done', 'WO-001', 'WO-002', '-s', 'operator'], api.base);
+
+  assert.equal(result.code, 1);
+  assert.deepEqual(api.requests[0].body, { actor: 'operator', ids: ['WO-001', 'WO-002'] });
+  assert.match(result.stdout, /closed: WO-001/);
+  assert.match(result.stdout, /unchecked.*WO-001/);
+  assert.match(result.stderr, /skipped WO-002: commit-not-in-deploy-tree/);
+});
