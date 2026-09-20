@@ -4,6 +4,8 @@
 
 *中文版：[人话版说明](docs/README.zh-CN.md) — 同样的内容，写给不看代码的人。*
 
+*Release history and migration notes: [CHANGELOG.md](CHANGELOG.md).*
+
 You have a few AI coding assistants. Today you talk to each of them in its own window, keep
 track of who is doing what in your head, and lose the thread the moment you walk away from
 the machine.
@@ -193,7 +195,7 @@ is decided, why messages expire, and what an adapter is and is not responsible f
 |---|---|---|
 | Available when your laptop is closed | yes | no |
 | Can you interrupt mid-task | no | yes |
-| Message never dropped | queued | forced once after 10 minutes, then expires |
+| Busy delivery | queued | one forced attempt after 10 minutes, then expires |
 | Lifecycle managed by | mousecrew | you |
 
 When a terminal window becomes idle, consecutive group messages for that crew member are

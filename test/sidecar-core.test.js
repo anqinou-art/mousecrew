@@ -106,8 +106,8 @@ test('busy comes from the screen, and the marker is configurable per agent', () 
 
 test('the default busy marker recognises current and older Claude Code without trapping a finished screen', () => {
   const busy = '✢ Harmonizing… (52s · ↓ 2.5k tokens · thinking)\n  ⎿  Tip: Use /btw to ask a quick side question';
-  const justFinished = '✻ Cogitated for 5s · done 3:38 PM\n\n────────────────────────\n❯ ';
-  const idle = '⏺ 20 — two full tens, a good stopping point.\n\n✻ Cogitated for 5s · done 3:38 PM\n\n❯ ';
+  const justFinished = '✻ Cogitated for 5s · done 12:34 PM\n\n────────────────────────\n❯ ';
+  const idle = '⏺ 20 — two full tens, a good stopping point.\n\n✻ Cogitated for 5s · done 12:34 PM\n\n❯ ';
 
   assert.equal(core.isBusy(busy, core.DEFAULT_BUSY_PATTERN), true);
   assert.equal(core.isBusy('running tool… (esc to interrupt)', core.DEFAULT_BUSY_PATTERN), true);
