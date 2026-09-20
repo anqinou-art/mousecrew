@@ -82,26 +82,42 @@ function releaseOwnedLock(lock, owner, deps) {
   lockUnlink(lock);
 }
 
-function cleanupAbandonedReclaims(lock, {
+function namedLockOwner(entry, prefix, suffix = '') {
+  if (!entry.startsWith(prefix) || (suffix && !entry.endsWith(suffix))) return null;
+  const value = entry.slice(prefix.length, suffix ? -suffix.length : undefined);
+  const separator = value.indexOf('-');
+  const pidText = separator < 0 ? '' : value.slice(0, separator);
+  const token = separator < 0 ? '' : value.slice(separator + 1);
+  if (!/^[1-9]\d*$/.test(pidText) || !token) return null;
+  const pid = Number.parseInt(pidText, 10);
+  if (!Number.isSafeInteger(pid)) return null;
+  return { pid, token };
+}
+
+function cleanupAbandonedLockLinks(lock, {
   lockReadDir = fs.readdirSync, lockUnlink = fs.unlinkSync, ...deps
 } = {}) {
   const dir = path.dirname(lock);
-  const prefix = `${path.basename(lock)}.reclaim-`;
+  const name = path.basename(lock);
+  const reclaimPrefix = `${name}.reclaim-`;
+  const ownerPrefix = `${name}.owner-`;
   let entries;
   try { entries = lockReadDir(dir); } catch (error) {
     if (error && error.code === 'ENOENT') return;
     throw error;
   }
   for (const entry of entries) {
-    if (!entry.startsWith(prefix)) continue;
-    const suffix = entry.slice(prefix.length);
-    const separator = suffix.indexOf('-');
-    const pidText = separator < 0 ? '' : suffix.slice(0, separator);
-    if (!/^[1-9]\d*$/.test(pidText)) continue;
-    const pid = Number.parseInt(pidText, 10);
-    if (!Number.isSafeInteger(pid)
-        || isLockOwnerAlive({ pid, token: 'reclaim' }, deps)) continue;
-    try { lockUnlink(path.join(dir, entry)); } catch (error) {
+    const reclaimOwner = namedLockOwner(entry, reclaimPrefix);
+    const preparedOwner = namedLockOwner(entry, ownerPrefix, '.tmp');
+    const linkOwner = reclaimOwner || preparedOwner;
+    if (!linkOwner || isLockOwnerAlive(linkOwner, deps)) continue;
+    const file = path.join(dir, entry);
+    if (preparedOwner) {
+      const contents = readLockOwner(file, deps);
+      if (!contents || contents.pid !== preparedOwner.pid
+          || contents.token !== preparedOwner.token) continue;
+    }
+    try { lockUnlink(file); } catch (error) {
       if (!error || error.code !== 'ENOENT') throw error;
     }
   }
@@ -147,7 +163,7 @@ function reclaimAbandonedLock(lock, deps) {
 function acquireOwnedLock(lock, deadline, deps) {
   const { now = Date.now, wait = sleepSync } = deps;
   while (true) {
-    cleanupAbandonedReclaims(lock, deps);
+    cleanupAbandonedLockLinks(lock, deps);
     try {
       return createOwnedLock(lock, deps);
     } catch (error) {

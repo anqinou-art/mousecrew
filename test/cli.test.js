@@ -472,6 +472,51 @@ fs.renameSync = function(from, to) {
   assert.deepEqual(fs.readdirSync(dir).filter((name) => name.includes('.reclaim-')), []);
 });
 
+test('a session writer recovers when the previous owner exits during lock publication', async (t) => {
+  const root = localCrewRoot(t);
+  const env = { MOUSECREW_ROOT: root, MOUSECREW_WINDOW: '%1' };
+  const dir = path.join(root, 'data', 'sessions');
+  const file = rotation.sessionRecordPath(dir, 'scout');
+  const lock = `${file}.lock`;
+  const oldStart = await runCli(['session-record', '--as', 'scout'], 'http://unused', {
+    env,
+    input: JSON.stringify({ session_id: 'session-a', transcript_path: '/tmp/a.jsonl' }),
+  });
+  assert.equal(oldStart.code, 0, oldStart.stderr);
+
+  const shim = path.join(root, 'exit-after-lock-publish.cjs');
+  fs.writeFileSync(shim, `
+const fs = require('fs');
+const link = fs.linkSync;
+fs.linkSync = function(from, to) {
+  const result = link.apply(fs, arguments);
+  if (String(from).includes('.lock.owner-') && String(to).endsWith('.lock')) process.exit(74);
+  return result;
+};
+`);
+  const interrupted = await runCli([
+    'session-activity', '--as', 'scout', 'busy',
+  ], 'http://unused', {
+    env: { ...env, NODE_OPTIONS: `--require=${shim}` },
+    input: JSON.stringify({ session_id: 'session-a' }),
+  });
+  assert.equal(interrupted.code, 74);
+  assert.equal(fs.statSync(lock).nlink, 2);
+  assert.equal(fs.readdirSync(dir).filter((name) => name.includes('.lock.owner-')).length, 1);
+
+  const recovered = await runCli([
+    'session-activity', '--as', 'scout', 'idle',
+  ], 'http://unused', {
+    env, input: JSON.stringify({ session_id: 'session-a' }),
+  });
+  assert.equal(recovered.code, 0, recovered.stderr);
+  const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(record.sessionId, 'session-a');
+  assert.equal(record.activity.state, 'idle');
+  assert.equal(fs.existsSync(lock), false);
+  assert.deepEqual(fs.readdirSync(dir).filter((name) => name.includes('.lock.owner-')), []);
+});
+
 test('a stale reclaimer cannot remove a newer writer lock', async (t) => {
   const root = localCrewRoot(t);
   const dir = path.join(root, 'data', 'sessions');
