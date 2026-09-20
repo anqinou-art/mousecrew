@@ -8,6 +8,8 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { buildIdentity } = require('../src/lib/identity');
+const rotation = require('../src/lib/rotation');
 
 function expandTilde(p) {
   if (p === '~') return os.homedir();
@@ -76,6 +78,18 @@ function flags(argv) {
   return out;
 }
 
+function loadLocalCrew() {
+  const { load } = require('../src/config');
+  return load({ root: process.env.MOUSECREW_ROOT || process.cwd() });
+}
+
+async function readStdin() {
+  let text = '';
+  process.stdin.setEncoding('utf8');
+  for await (const chunk of process.stdin) text += chunk;
+  return text;
+}
+
 const NEXT = { draft: 'in_progress', in_progress: 'submitted', rejected: 'in_progress' };
 
 const USAGE = `mousecrew — drive the work board
@@ -102,6 +116,7 @@ const USAGE = `mousecrew — drive the work board
   dm --to <agent> "text"                      message one agent
   reply --as <agent> "text"                   answer a direct message
   identity <agent> [--window ref]              claim this window for a crew member
+  session-record --as <agent> [--window ref]   record SessionStart JSON from stdin
   rotate <agent>                               rotate a local agent after its current turn
   status                                      every agent's state
 
@@ -350,9 +365,9 @@ async function main() {
       const who = f._[0];
       if (!who) die('need <agent-id>  (run this inside the window you want to claim)');
       const { createAdapter } = require('../adapters/terminal');
-      const { load } = require('../src/config');
-      const { agents } = load();
-      const cfg = agents.find((a) => a.id === who || a.displayName === who);
+      const { config, agents } = loadLocalCrew();
+      const names = buildIdentity(agents);
+      const cfg = agents.find((a) => a.id === names.normalizeAgentId(who));
       if (!cfg) die(`"${who}" is not on the roster`);
       if (cfg.transport !== 'terminal') die(`"${who}" is not a terminal agent — nothing to claim`);
 
@@ -365,17 +380,82 @@ async function main() {
             `Windows I can see: ${(await adapter.listWindows()).map((w) => w.ref).join(', ') || '(none)'}`);
       }
 
-      for (const w of await adapter.listWindows()) {
-        if (w.identity === target && w.ref !== ref) {
-          await adapter.clearIdentity(w.ref);
-          console.log(`released ${target} from ${w.ref}`);
-        }
+      const windows = await adapter.listWindows();
+      const moved = windows.filter((w) => w.identity === target && w.ref !== ref);
+      try {
+        rotation.invalidateMovedRecord(
+          rotation.sessionDirectory(config), cfg.id, moved.map((window) => window.ref),
+        );
+      } catch (error) {
+        die(`cannot invalidate the old session record (${error.message}) — identity was not moved`);
+      }
+      for (const w of moved) {
+        await adapter.clearIdentity(w.ref);
+        console.log(`released ${target} from ${w.ref}`);
       }
       await adapter.setIdentity(ref, target);
       // Read it back. "The command exited 0" is a claim; the listing is the fact.
       const now = (await adapter.listWindows()).find((w) => w.ref === ref);
       if (!now || now.identity !== target) die(`set it, but reading back gave ${now ? now.identity : '(window gone)'} — not claimed`);
       console.log(`${ref} is now ${target}`);
+      break;
+    }
+
+    case 'session-record': {
+      if (typeof f.as !== 'string' || !f.as.trim()) die('need --as <agent>');
+      const { config, agents } = loadLocalCrew();
+      const names = buildIdentity(agents);
+      const agent = names.normalizeAgentId(f.as);
+      const cfg = agents.find((entry) => entry.id === agent);
+      if (!cfg) die(`"${f.as}" is not on the roster`);
+      if (cfg.transport !== 'terminal') die(`"${f.as}" is not a terminal agent — no window session to record`);
+      const windowInput = f.window !== undefined
+        ? f.window
+        : (process.env.MOUSECREW_WINDOW || process.env.TMUX_PANE);
+      if (typeof windowInput !== 'string' || !windowInput.trim()) {
+        die('cannot tell which window this is; pass --window or set MOUSECREW_WINDOW / TMUX_PANE');
+      }
+      const windowRef = windowInput.trim();
+      const sessionDir = rotation.sessionDirectory(config);
+      const invalidateCurrent = () => {
+        try { rotation.invalidateMovedRecord(sessionDir, cfg.id, [windowRef]); }
+        catch (error) { die(`cannot invalidate the previous session record (${error.message})`); }
+      };
+
+      let hook;
+      const raw = await readStdin();
+      try { hook = JSON.parse(raw); }
+      catch (error) {
+        invalidateCurrent();
+        die(`SessionStart stdin is not valid JSON (${error.message})`);
+      }
+      if (!hook || typeof hook !== 'object' || Array.isArray(hook)) {
+        invalidateCurrent();
+        die('SessionStart stdin must be a JSON object');
+      }
+      if (typeof hook.session_id !== 'string' || !hook.session_id.trim()) {
+        invalidateCurrent();
+        die('SessionStart JSON is missing non-empty session_id');
+      }
+      if (typeof hook.transcript_path !== 'string' || !hook.transcript_path.trim()) {
+        invalidateCurrent();
+        die('SessionStart JSON is missing non-empty transcript_path');
+      }
+      const record = {
+        agent: cfg.id,
+        windowRef,
+        sessionId: hook.session_id.trim(),
+        transcriptPath: hook.transcript_path.trim(),
+        cwd: typeof hook.cwd === 'string' ? hook.cwd : null,
+        recordedAt: new Date().toISOString(),
+      };
+      let file;
+      try { file = rotation.writeSessionRecord(sessionDir, record); }
+      catch (error) {
+        invalidateCurrent();
+        die(`cannot record SessionStart (${error.message})`);
+      }
+      console.log(`recorded ${cfg.id} session ${record.sessionId} for ${windowRef} in ${file}`);
       break;
     }
 

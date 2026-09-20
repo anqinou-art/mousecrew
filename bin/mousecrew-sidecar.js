@@ -20,6 +20,7 @@ const { buildIdentity } = require('../src/lib/identity');
 const { createAdapter } = require('../adapters/terminal');
 const { Sidecar } = require('../src/lib/sidecar');
 const { readTokenFile } = require('../src/lib/require-token');
+const { sessionDirectory } = require('../src/lib/rotation');
 
 const args = process.argv.slice(2);
 const flag = (name, fallback) => {
@@ -80,6 +81,7 @@ const sidecar = new Sidecar({
   agents,
   client,
   statePath: path.join(path.dirname(config.dbPath), 'sidecar-state.json'),
+  sessionDir: sessionDirectory(config),
 }, {
   stalePendingMs: config.delivery.stalePendingMs,
   maxPending: config.delivery.maxPending,
@@ -92,6 +94,8 @@ const sidecar = new Sidecar({
   wakeDir: config.delivery.wakeDir,
   wakeMaxContent: config.delivery.wakeMaxContent,
   wakeSettleMs: config.delivery.wakeSettleMs,
+  rotationPollMs: config.delivery.rotationPollMs,
+  handoffDir: config.contextWatch.handoffDir,
 });
 
 // Log every structured event. These are the same events the tests assert against, so what
@@ -152,6 +156,7 @@ async function main() {
 
   console.log(`mousecrew sidecar — adapter=${adapterName}, watching for: ${terminalAgents.map((a) => a.displayName).join(', ')}`);
   await sidecar.pollHistory();       // establishes the baseline; delivers nothing
+  await sidecar.tickRotation();
 
   if (has('once')) {
     await sidecar.deliver();

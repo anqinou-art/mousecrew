@@ -211,6 +211,16 @@ delivery waits at this gate for at most `delivery.forcedDraftHoldMs` (90 seconds
 An unrecognised screen layout fails open, so a different CLI or TUI update behaves exactly
 as if input-box detection were disabled.
 
+Terminal agents can also opt into session-rotation reminders with `terminal.rotation`.
+A Claude Code `SessionStart` hook records the exact window, session id, and transcript;
+mousecrew never guesses which recent file belongs to a window. Rules can watch the latest
+Claude-style context-token usage, count literal marker lines, or use both (either limit
+triggers). Reminders keep waiting for an idle, draft-safe window without expiring, forced
+delivery, or batching, and the sidecar rechecks the recorded window and session immediately
+before injection. They point to today's handoff file but do not rotate the session
+automatically. See [the terminal guide](docs/TERMINAL.md#optional-session-rotation-reminders)
+for the hook and roster configuration.
+
 Local programs can wake a terminal agent without an API token by setting
 `delivery.wakeDir` and atomically moving a small JSON request into that directory. A request
 contains `agent`, a deduplication `key`, `content`, and an optional `sender`. It is only a

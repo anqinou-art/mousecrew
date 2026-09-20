@@ -125,6 +125,7 @@ test('delivery batching config has defaults and refuses invalid types at startup
     wakeDir: null,
     wakeMaxContent: 600,
     wakeSettleMs: 5000,
+    rotationPollMs: 300000,
   });
   for (const [delivery, expected] of [
     [{ batchGroup: 'yes' }, /delivery\.batchGroup must be a boolean/],
@@ -136,10 +137,31 @@ test('delivery batching config has defaults and refuses invalid types at startup
     [{ wakeDir: '' }, /delivery\.wakeDir must be a non-empty path/],
     [{ wakeMaxContent: 0 }, /delivery\.wakeMaxContent must be a positive integer/],
     [{ wakeSettleMs: -1 }, /delivery\.wakeSettleMs must be a non-negative integer/],
+    [{ rotationPollMs: 0 }, /delivery\.rotationPollMs must be a positive integer/],
   ]) {
     const configFile = path.join(dir, `config-${Object.keys(delivery)[0]}.json`);
     fs.writeFileSync(configFile, JSON.stringify({ delivery }));
     assert.throws(() => load({ configFile, agentsFile, root: dir }), expected);
+  }
+});
+
+test('terminal rotation accepts one or more known rules and rejects incomplete rules', () => {
+  const terminal = (rotation) => [{
+    id: 'term', transport: 'terminal', terminal: { adapter: 'fake', rotation },
+  }];
+  assert.deepEqual(ok(terminal({ kind: 'tokens', limit: 120000 })), []);
+  assert.deepEqual(ok(terminal([
+    { kind: 'tokens', limit: 120000 },
+    { kind: 'marker', marker: '"type":"compacted"', limit: 10 },
+  ])), []);
+
+  for (const [rotation, expected] of [
+    [[], /must contain at least one rule/],
+    [{ kind: 'bytes', limit: 10 }, /kind must be "tokens" or "marker"/],
+    [{ kind: 'tokens', limit: 0 }, /limit must be a positive integer/],
+    [{ kind: 'marker', limit: 2 }, /marker must be a non-empty string/],
+  ]) {
+    assert.ok(ok(terminal(rotation)).some((error) => expected.test(error)));
   }
 });
 

@@ -223,6 +223,24 @@ test('a local wake is a standalone envelope and never gains forced delivery', ()
   assert.equal(wake.forcedAt, undefined);
 });
 
+test('a rotation reminder never expires, batches, gains a reply instruction, or becomes forced', () => {
+  const rotate = {
+    agent: 'architect', kind: 'rotate', sender: 'mousecrew', content: 'write a handoff',
+    queuedAt: new Date(NOW - 11 * 60_000).toISOString(), draftHeldAt: 'earlier',
+  };
+  const group = { agent: 'architect', kind: 'group', content: 'ordinary message' };
+
+  assert.deepEqual(core.filterFresh([rotate], NOW, 10 * 60_000), [rotate]);
+  assert.deepEqual(core.nextDeliverableBatch([rotate, group], 'architect'), [rotate]);
+  assert.equal(core.batchEnvelope({ items: [rotate], agent: 'architect' }),
+    '[session rotation reminder] write a handoff');
+  assert.equal(core.batchEnvelope({
+    items: [rotate], agent: 'architect', bodyFile: '/tmp/rotate.txt', inlineLimit: 5,
+  }), '[session rotation reminder] write\n\n[truncated — read the full message before replying: /tmp/rotate.txt]');
+  assert.deepEqual(core.markForcedDeliveries([rotate], NOW, true), { forced: [], absorbed: [] });
+  assert.equal(rotate.forcedAt, undefined);
+});
+
 test('an idle expired item only earns forced delivery after a persisted draft hold', () => {
   const plain = { agent: 'architect', kind: 'group' };
   const held = { agent: 'architect', kind: 'group', draftHeldAt: 'earlier' };
