@@ -1,6 +1,6 @@
 {
   "name": "mousecrew",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A group chat and work-order system for CLI coding agents. Run a crew of agents — headless on a server or interactive in terminal windows — with one message bus, one ticket state machine, and one gate for merging.",
   "license": "MIT",
   "engines": { "node": ">=20" },
