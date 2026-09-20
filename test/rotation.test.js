@@ -96,6 +96,22 @@ test('session records are private, replace the previous session, and invalidate 
   assert.equal(fs.existsSync(file), false);
 });
 
+test('session activity belongs to the recorded window and session', () => {
+  const record = {
+    agent: 'scout', windowRef: '%1', sessionId: 'session-a', transcriptPath: '/tmp/a.jsonl',
+    activity: {
+      state: 'busy', windowRef: '%1', sessionId: 'session-a',
+      recordedAt: '2026-09-20T08:00:00.000Z',
+    },
+  };
+  assert.equal(rotation.sessionActivity(record, '%1').state, 'busy');
+  assert.equal(rotation.sessionActivity(record, '%2'), null);
+  assert.equal(rotation.sessionActivity({
+    ...record, activity: { ...record.activity, sessionId: 'session-b' },
+  }, '%1'), null);
+  assert.equal(rotation.sessionActivity({ ...record, activity: null }, '%1'), null);
+});
+
 test('rotation source requires the same window and session, and the reminder names the handoff and manual action', () => {
   const item = { kind: 'rotate', rotateWindowRef: '%1', rotateSessionId: 'session-a' };
   assert.equal(rotation.rotateSourceState(item, '%1', {

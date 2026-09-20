@@ -57,10 +57,8 @@ class AgentRuntime extends EventEmitter {
 
     this._pendingRotate = null;
     this._rotateVerify = null;
-    this._rotateVerifyTimer = null;
     this._pendingBriefing = null;
     this.lastRotate = null;
-    this._rotateVerifyMs = deps.rotateVerifyMs ?? cfg.rotateVerifyMs;
     this._contextWatch = deps.contextWatch || {};
 
     this.contextLimit = cfg.contextLimit || 200_000;
@@ -100,10 +98,6 @@ class AgentRuntime extends EventEmitter {
   newSession() {
     this._pendingRotate = null;
     this._rotateVerify = null;
-    if (this._rotateVerifyTimer) {
-      clearTimeout(this._rotateVerifyTimer);
-      this._rotateVerifyTimer = null;
-    }
     this._pendingBriefing = null;
     return this._replaceSession();
   }
@@ -122,7 +116,7 @@ class AgentRuntime extends EventEmitter {
   /** Finish the current turn before replacing its process and session. */
   rotate() {
     if (this._pendingRotate) return { queued: true };
-    if (this._rotateVerify && !this._rotateVerify.timedOut) {
+    if (this._rotateVerify) {
       return { queued: false, rotating: true };
     }
     const request = { requestedAt: new Date().toISOString() };
@@ -142,8 +136,6 @@ class AgentRuntime extends EventEmitter {
       noHandoff: this._contextWatch.noHandoff,
       maxAgeDays: this._contextWatch.handoffMaxAgeDays,
     });
-    this._rotateVerifyTimer = setTimeout(() => this._timeoutRotate(), this._rotateVerifyMs);
-    if (this._rotateVerifyTimer.unref) this._rotateVerifyTimer.unref();
 
     const hadProcess = !!this.proc;
     this._replaceSession();
@@ -152,24 +144,12 @@ class AgentRuntime extends EventEmitter {
 
   _settleRotate(newId) {
     if (!this._rotateVerify) return;
-    const { from, timedOut } = this._rotateVerify;
+    const { from, requestedAt } = this._rotateVerify;
     this._rotateVerify = null;
-    if (this._rotateVerifyTimer) {
-      clearTimeout(this._rotateVerifyTimer);
-      this._rotateVerifyTimer = null;
-    }
     const ok = !!newId && newId !== from;
-    if (timedOut && !ok) return;
-    this.lastRotate = { at: new Date().toISOString(), ok, from, to: newId || null };
-    if (timedOut) this.lastRotate.late = true;
-  }
-
-  _timeoutRotate() {
-    if (!this._rotateVerify || this._rotateVerify.timedOut) return;
-    this._rotateVerify.timedOut = true;
-    this._rotateVerifyTimer = null;
     this.lastRotate = {
-      at: new Date().toISOString(), ok: false, from: this._rotateVerify.from, to: null,
+      at: new Date().toISOString(), ok, from, to: newId || null,
+      waitedMs: Math.max(0, Date.now() - Date.parse(requestedAt)),
     };
   }
 
@@ -358,7 +338,7 @@ class AgentRuntime extends EventEmitter {
   }
 
   _handleEvent(ev) {
-    if (ev.type === 'system' && ev.subtype === 'init' && ev.session_id && this._rotateVerify) {
+    if (ev.session_id && this._rotateVerify) {
       this._settleRotate(ev.session_id);
     }
     if (ev.session_id && ev.session_id !== this.sessionId) {
@@ -571,11 +551,12 @@ class AgentRuntime extends EventEmitter {
   }
 
   status() {
-    const rotationStatus = this._rotateVerify && !this._rotateVerify.timedOut
-      ? 'verifying'
-      : this.lastRotate && (this.lastRotate.ok
-        ? (this.lastRotate.late ? 'verified_late' : 'verified')
-        : 'failed');
+    const rotationStatus = this._rotateVerify
+      ? 'pending_confirmation'
+      : this.lastRotate && (this.lastRotate.ok ? 'verified' : 'failed');
+    const rotationWaitMs = this._rotateVerify
+      ? Math.max(0, Date.now() - Date.parse(this._rotateVerify.requestedAt))
+      : null;
     return {
       id: this.name,
       transport: 'local',
@@ -588,6 +569,7 @@ class AgentRuntime extends EventEmitter {
       sessionMessages: this.sessionMessages,
       lastRotate: this.lastRotate,
       rotationStatus: rotationStatus || null,
+      rotationWaitMs,
       rotateQueued: !!this._pendingRotate,
       stats: this.stats,
     };
@@ -595,10 +577,7 @@ class AgentRuntime extends EventEmitter {
 
   /** Public teardown used by tests and shutdown. Never leaves a timer behind. */
   destroy() {
-    if (this._rotateVerifyTimer) {
-      clearTimeout(this._rotateVerifyTimer);
-      this._rotateVerifyTimer = null;
-    }
+    this._rotateVerify = null;
     this.stop();
     this.removeAllListeners();
   }

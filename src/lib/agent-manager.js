@@ -80,7 +80,7 @@ class AgentManager extends EventEmitter {
           id, transport: 'local', runner: cfg.runner, state: 'unspawned',
           queueLength: 0, processAlive: false, sessionId: null,
           context: { tokens: 0, limit: cfg.contextLimit }, sessionMessages: 0,
-          lastRotate: null, rotationStatus: null, rotateQueued: false,
+          lastRotate: null, rotationStatus: null, rotationWaitMs: null, rotateQueued: false,
         };
       } else if (cfg.transport === 'remote') {
         const r = this.remotes.get(id);

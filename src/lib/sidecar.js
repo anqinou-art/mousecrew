@@ -524,6 +524,21 @@ class Sidecar extends EventEmitter {
     this.emit('event', { type: 'rotation-stale', agent: item.agent, ref });
   }
 
+  _activityVerdict(cfg, ref, screen) {
+    const record = this.sessionDir
+      ? rotation.readSessionRecord(this.sessionDir, cfg.id)
+      : null;
+    const activity = rotation.sessionActivity(record, ref);
+    if (activity) {
+      return {
+        busy: activity.state === 'busy', source: 'hook', recordedAt: activity.recordedAt,
+      };
+    }
+    const pattern = cfg.terminal && cfg.terminal.busyPattern !== undefined
+      ? cfg.terminal.busyPattern : this.opt.busyPattern;
+    return { busy: core.isBusy(screen, pattern), source: 'screen', recordedAt: null };
+  }
+
   /**
    * One delivery pass: for each crew member with something waiting, if their window is
    * free, type the oldest item in.
@@ -567,8 +582,6 @@ class Sidecar extends EventEmitter {
         continue;
       }
 
-      const pattern = cfg && cfg.terminal && cfg.terminal.busyPattern !== undefined
-        ? cfg.terminal.busyPattern : this.opt.busyPattern;
       let screen = '';
       try { screen = await this.adapter.readScreen(found.ref, this.opt.screenLines); }
       catch (e) {
@@ -577,7 +590,8 @@ class Sidecar extends EventEmitter {
         continue;
       }
 
-      const busy = core.isBusy(screen, pattern);
+      const activity = this._activityVerdict(cfg, found.ref, screen);
+      const busy = activity.busy;
       let draft = null;
       const inspectDraft = () => {
         if (!draft) draft = this._draftVerdict(cfg, found.ref, screen);
@@ -616,7 +630,7 @@ class Sidecar extends EventEmitter {
       const plan = core.planDelivery(item, busy);
       if (plan === 'wait_forced_expiry') continue;
       if (plan === 'wait_busy') {
-        this.emit('event', { type: 'busy-wait', agent, ref: found.ref });
+        this.emit('event', { type: 'busy-wait', agent, ref: found.ref, source: activity.source });
         continue;
       }
 
@@ -712,8 +726,8 @@ class Sidecar extends EventEmitter {
   /**
    * Report each crew member's state. Order matters and is fixed:
    *   no window            -> stopped      ("we cannot see it", not "it is free")
-   *   screen says busy     -> busy
-   *   otherwise            -> idle
+   *   matching hook state  -> busy/idle
+   *   otherwise screen    -> busy/idle
    *
    * Same screen reading the delivery back-pressure uses, so the status line and the
    * delivery decision can never contradict each other — no "holding messages back from an
@@ -732,9 +746,11 @@ class Sidecar extends EventEmitter {
       let screen = '';
       try { screen = await this.adapter.readScreen(found.ref, this.opt.screenLines); }
       catch { report[cfg.id] = { state: 'stopped', detail: 'unreadable' }; continue; }
-      const pattern = cfg.terminal && cfg.terminal.busyPattern !== undefined
-        ? cfg.terminal.busyPattern : this.opt.busyPattern;
-      report[cfg.id] = { state: core.isBusy(screen, pattern) ? 'busy' : 'idle', detail: null };
+      const activity = this._activityVerdict(cfg, found.ref, screen);
+      report[cfg.id] = {
+        state: activity.busy ? 'busy' : 'idle',
+        detail: { source: activity.source, recordedAt: activity.recordedAt },
+      };
     }
 
     if (this.client.presence) {

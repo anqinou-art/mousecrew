@@ -76,6 +76,20 @@ function primed(h) {
   return h;
 }
 
+function recordActivity(h, {
+  agent = 'architect', windowRef = '%1', sessionId = 'session-a', state = 'busy',
+  activityWindowRef = windowRef, activitySessionId = sessionId,
+} = {}) {
+  rotation.writeSessionRecord(h.sc.sessionDir, {
+    agent, windowRef, sessionId, transcriptPath: '/tmp/session.jsonl',
+    recordedAt: new Date(h.sc.now()).toISOString(),
+    activity: {
+      state, windowRef: activityWindowRef, sessionId: activitySessionId,
+      recordedAt: new Date(h.sc.now()).toISOString(),
+    },
+  });
+}
+
 // ---------- intake ----------
 
 test('the first history batch only sets a baseline', async () => {
@@ -153,6 +167,51 @@ test('...and it lands once the window frees up', async () => {
   h.adapter.__test.setScreen('%1', '> ');
   await h.sc.deliver();
   assert.equal(h.of('injected').length, 1);
+});
+
+test('matching hook activity overrides the screen for both busy and idle', async () => {
+  const busy = primed(harness({
+    windows: [{ ref: '%1', identity: 'lead', screen: '> ' }],
+  }));
+  recordActivity(busy, { state: 'busy' });
+  busy.sc.ingest([msg('human', '@lead wait for the turn')], 'sse');
+  await busy.sc.deliver();
+  assert.equal(busy.of('busy-wait').length, 1);
+  assert.equal(busy.of('busy-wait')[0].source, 'hook');
+  assert.equal(busy.adapter.__test.sentTo('%1').length, 0);
+  assert.deepEqual((await busy.sc.reportPresence()).architect.detail.source, 'hook');
+
+  const idle = primed(harness({
+    windows: [{ ref: '%1', identity: 'lead', screen: 'busy (esc to interrupt)' }],
+  }));
+  recordActivity(idle, { state: 'idle' });
+  idle.sc.ingest([msg('human', '@lead the hook says free')], 'sse');
+  await idle.sc.deliver();
+  assert.equal(idle.of('busy-wait').length, 0);
+  assert.equal(idle.adapter.__test.sentTo('%1').length, 1);
+  assert.equal((await idle.sc.reportPresence()).architect.state, 'idle');
+  assert.equal((await idle.sc.reportPresence()).architect.detail.source, 'hook');
+});
+
+test('window or session mismatch ignores hook activity and falls back to the screen', async () => {
+  const wrongWindow = primed(harness({
+    windows: [{ ref: '%1', identity: 'lead', screen: '> ' }],
+  }));
+  recordActivity(wrongWindow, { windowRef: '%2', state: 'busy' });
+  wrongWindow.sc.ingest([msg('human', '@lead current window is free')], 'sse');
+  await wrongWindow.sc.deliver();
+  assert.equal(wrongWindow.adapter.__test.sentTo('%1').length, 1);
+  assert.equal((await wrongWindow.sc.reportPresence()).architect.detail.source, 'screen');
+
+  const wrongSession = primed(harness({
+    windows: [{ ref: '%1', identity: 'lead', screen: 'busy (esc to interrupt)' }],
+  }));
+  recordActivity(wrongSession, { activitySessionId: 'session-b', state: 'idle' });
+  wrongSession.sc.ingest([msg('human', '@lead old hook is stale')], 'sse');
+  await wrongSession.sc.deliver();
+  assert.equal(wrongSession.of('busy-wait').length, 1);
+  assert.equal(wrongSession.of('busy-wait')[0].source, 'screen');
+  assert.equal(wrongSession.adapter.__test.sentTo('%1').length, 0);
 });
 
 test('an unregistered window is waited for, not treated as an error', async () => {
@@ -870,6 +929,21 @@ test('a message held by a busy window for ten minutes is forced once and deliver
   assert.equal(h.sc.state.pending.length, 0);
 });
 
+test('a stuck hook busy state still reaches the one forced delivery path', async () => {
+  const h = primed(harness({ windows: [{ ref: '%1', identity: 'lead', screen: '> ' }] }));
+  recordActivity(h, { state: 'busy' });
+  h.sc.ingest([msg('human', '@lead do not wait forever')], 'sse');
+  await h.sc.deliver();
+  h.advance(11 * 60 * 1000);
+  await h.sc.deliver();
+
+  assert.equal(h.of('busy-wait').length, 1);
+  assert.equal(h.of('busy-wait')[0].source, 'hook');
+  assert.equal(h.of('forced').length, 1);
+  assert.equal(h.adapter.__test.sentTo('%1').length, 1);
+  assert.equal(h.sc.state.pending.length, 0);
+});
+
 test('a draft-held message earns one forced attempt and waits only the forced draft limit', async () => {
   const h = primed(harness({
     windows: [{ ref: '%1', identity: 'lead', screen: inputScreen('still typing') }],
@@ -1072,6 +1146,7 @@ test('presence uses the same screen reading as delivery back-pressure', async ()
   }] }));
   const report = await h.sc.reportPresence();
   assert.equal(report.architect.state, 'busy');
+  assert.equal(report.architect.detail.source, 'screen');
 
   h.sc.ingest([msg('human', '@lead hi')], 'sse');
   await h.sc.deliver();

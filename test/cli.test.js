@@ -252,20 +252,22 @@ test('rotate uses the graceful endpoint and does not claim an unverified success
   assert.doesNotMatch(result.stdout, /success|succeeded/i);
 });
 
-test('status distinguishes verifying, verified, late verified, and failed rotations', async (t) => {
+test('status distinguishes pending, verified, and failed rotations and names activity sources', async (t) => {
   const api = await scriptedApi(t, [{ body: {
-    checking: { transport: 'local', state: 'starting', rotationStatus: 'verifying', lastRotate: null },
+    checking: { transport: 'local', state: 'starting', rotationStatus: 'pending_confirmation', rotationWaitMs: 12_345, lastRotate: null },
     complete: { transport: 'local', state: 'idle', rotationStatus: 'verified', lastRotate: { ok: true, from: 'a', to: 'b' } },
-    late: { transport: 'local', state: 'idle', rotationStatus: 'verified_late', lastRotate: { ok: true, late: true, from: 'c', to: 'd' } },
     failed: { transport: 'local', state: 'idle', rotationStatus: 'failed', lastRotate: { ok: false, from: 'e', to: null } },
+    hooked: { transport: 'terminal', state: 'busy', detail: { source: 'hook' } },
+    fallback: { transport: 'terminal', state: 'idle', detail: { source: 'screen' } },
   } }]);
   const result = await runCli(['status'], api.base);
 
   assert.equal(result.code, 0, result.stderr);
-  assert.match(result.stdout, /checking[\s\S]*rotation verifying/);
+  assert.match(result.stdout, /checking[\s\S]*rotation pending confirmation \(waiting 12s\)/);
   assert.match(result.stdout, /complete[\s\S]*last rotation verified: a -> b/);
-  assert.match(result.stdout, /late[\s\S]*last rotation verified late: c -> d/);
   assert.match(result.stdout, /failed[\s\S]*last rotation failed: e -> -/);
+  assert.match(result.stdout, /hooked[^\n]*activity hook/);
+  assert.match(result.stdout, /fallback[^\n]*activity screen/);
 });
 
 test('session-record accepts the three window sources, replaces the agent record, and keeps it private', async (t) => {
@@ -320,6 +322,51 @@ test('session-record rejects malformed or incomplete hook input without creating
     assert.equal(result.code, 1);
     assert.equal(fs.existsSync(file), false, 'a failed SessionStart cannot leave the old session current');
   }
+});
+
+test('session-activity updates only the matching SessionStart record', async (t) => {
+  const root = localCrewRoot(t);
+  const env = { MOUSECREW_ROOT: root, MOUSECREW_WINDOW: '%1' };
+  const file = rotation.sessionRecordPath(path.join(root, 'data', 'sessions'), 'scout');
+  const started = await runCli(['session-record', '--as', 'scout'], 'http://unused', {
+    env,
+    input: JSON.stringify({ session_id: 'session-a', transcript_path: '/tmp/a.jsonl' }),
+  });
+  assert.equal(started.code, 0, started.stderr);
+
+  for (const state of ['busy', 'idle']) {
+    const result = await runCli(['session-activity', '--as', 'scout', state], 'http://unused', {
+      env, input: JSON.stringify({ session_id: 'session-a' }),
+    });
+    assert.equal(result.code, 0, result.stderr);
+    const activity = JSON.parse(fs.readFileSync(file, 'utf8')).activity;
+    assert.equal(activity.state, state);
+    assert.equal(activity.windowRef, '%1');
+    assert.equal(activity.sessionId, 'session-a');
+    assert.ok(Date.parse(activity.recordedAt));
+  }
+
+  const before = fs.readFileSync(file, 'utf8');
+  const wrongSession = await runCli(['session-activity', '--as', 'scout', 'busy'], 'http://unused', {
+    env, input: JSON.stringify({ session_id: 'session-b' }),
+  });
+  assert.equal(wrongSession.code, 0, wrongSession.stderr);
+  assert.match(wrongSession.stdout, /ignored/);
+  assert.equal(fs.readFileSync(file, 'utf8'), before);
+
+  const wrongWindow = await runCli([
+    'session-activity', '--as', 'scout', 'busy', '--window', '%2',
+  ], 'http://unused', {
+    env, input: JSON.stringify({ session_id: 'session-a' }),
+  });
+  assert.equal(wrongWindow.code, 0, wrongWindow.stderr);
+  assert.equal(fs.readFileSync(file, 'utf8'), before);
+
+  const invalid = await runCli(['session-activity', '--as', 'scout', 'working'], 'http://unused', {
+    env, input: JSON.stringify({ session_id: 'session-a' }),
+  });
+  assert.equal(invalid.code, 1);
+  assert.equal(fs.readFileSync(file, 'utf8'), before);
 });
 
 test('session-record keeps an encoded-looking id separate from the id that encodes to it', async (t) => {

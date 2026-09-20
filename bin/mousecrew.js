@@ -117,6 +117,7 @@ const USAGE = `mousecrew — drive the work board
   reply --as <agent> "text"                   answer a direct message
   identity <agent> [--window ref]              claim this window for a crew member
   session-record --as <agent> [--window ref]   record SessionStart JSON from stdin
+  session-activity --as <agent> busy|idle       record hook activity JSON from stdin
   rotate <agent>                               rotate a local agent after its current turn
   status                                      every agent's state
 
@@ -459,13 +460,61 @@ async function main() {
       break;
     }
 
+    case 'session-activity': {
+      if (typeof f.as !== 'string' || !f.as.trim()) die('need --as <agent>');
+      const state = f._[0];
+      if (state !== 'busy' && state !== 'idle') die('activity must be busy or idle');
+      const { config, agents } = loadLocalCrew();
+      const names = buildIdentity(agents);
+      const agent = names.normalizeAgentId(f.as);
+      const cfg = agents.find((entry) => entry.id === agent);
+      if (!cfg) die(`"${f.as}" is not on the roster`);
+      if (cfg.transport !== 'terminal') die(`"${f.as}" is not a terminal agent — no window activity to record`);
+      const windowInput = f.window !== undefined
+        ? f.window
+        : (process.env.MOUSECREW_WINDOW || process.env.TMUX_PANE);
+      if (typeof windowInput !== 'string' || !windowInput.trim()) {
+        die('cannot tell which window this is; pass --window or set MOUSECREW_WINDOW / TMUX_PANE');
+      }
+      const windowRef = windowInput.trim();
+      let hook;
+      const raw = await readStdin();
+      try { hook = JSON.parse(raw); }
+      catch (error) { die(`hook stdin is not valid JSON (${error.message})`); }
+      if (!hook || typeof hook !== 'object' || Array.isArray(hook)) {
+        die('hook stdin must be a JSON object');
+      }
+      if (typeof hook.session_id !== 'string' || !hook.session_id.trim()) {
+        die('hook JSON is missing non-empty session_id');
+      }
+
+      const sessionDir = rotation.sessionDirectory(config);
+      const record = rotation.readSessionRecord(sessionDir, cfg.id);
+      const sessionId = hook.session_id.trim();
+      if (!record || record.windowRef !== windowRef || record.sessionId !== sessionId) {
+        console.log(`ignored ${state} activity for ${cfg.id}: window or session does not match SessionStart`);
+        break;
+      }
+      record.activity = {
+        state,
+        recordedAt: new Date().toISOString(),
+        windowRef,
+        sessionId,
+      };
+      let file;
+      try { file = rotation.writeSessionRecord(sessionDir, record); }
+      catch (error) { die(`cannot record session activity (${error.message})`); }
+      console.log(`recorded ${cfg.id} ${state} activity for ${windowRef} in ${file}`);
+      break;
+    }
+
     case 'rotate': {
       if (!id) die('need <agent>');
       const r = await api('POST', `/api/agents/${id}/session/rotate`);
       console.log(r.queued
         ? `${id}: rotation queued until the current turn finishes`
         : `${id}: rotation started`);
-      console.log('check `mousecrew status` for the verified result');
+      console.log('check `mousecrew status` for confirmation from the new process');
       break;
     }
 
@@ -574,15 +623,18 @@ async function main() {
       const s = await api('GET', '/api/agents/status');
       for (const [name, v] of Object.entries(s)) {
         const ctx = v.context ? ` ctx ${Math.round((v.context.tokens || 0) / 1000)}k/${Math.round(v.context.limit / 1000)}k` : '';
-        console.log(`  ${name.padEnd(12)} ${String(v.transport).padEnd(9)} ${String(v.state).padEnd(10)}${ctx}`);
+        const activity = v.detail && (v.detail.source === 'hook' || v.detail.source === 'screen')
+          ? ` activity ${v.detail.source}` : '';
+        console.log(`  ${name.padEnd(12)} ${String(v.transport).padEnd(9)} ${String(v.state).padEnd(10)}${ctx}${activity}`);
         if (v.rotateQueued) console.log('               rotation queued');
-        if (v.rotationStatus === 'verifying') {
-          console.log('               rotation verifying');
+        if (v.rotationStatus === 'pending_confirmation') {
+          const seconds = Math.floor((v.rotationWaitMs || 0) / 1000);
+          console.log(`               rotation pending confirmation (waiting ${seconds}s)`);
         } else if (v.lastRotate) {
-          const verdict = v.lastRotate.ok
-            ? (v.lastRotate.late ? 'verified late' : 'verified')
-            : 'failed';
-          console.log(`               last rotation ${verdict}: ${v.lastRotate.from || '-'} -> ${v.lastRotate.to || '-'}`);
+          const verdict = v.lastRotate.ok ? 'verified' : 'failed';
+          const waited = Number.isFinite(v.lastRotate.waitedMs)
+            ? ` (waited ${Math.floor(v.lastRotate.waitedMs / 1000)}s)` : '';
+          console.log(`               last rotation ${verdict}: ${v.lastRotate.from || '-'} -> ${v.lastRotate.to || '-'}${waited}`);
         }
       }
       break;

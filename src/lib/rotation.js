@@ -59,6 +59,16 @@ function invalidateMovedRecord(dir, agent, oldRefs, {
   return true;
 }
 
+function sessionActivity(record, currentRef) {
+  if (!record || record.windowRef !== currentRef) return null;
+  const activity = record.activity;
+  if (!activity || typeof activity !== 'object' || Array.isArray(activity)) return null;
+  if (activity.state !== 'busy' && activity.state !== 'idle') return null;
+  if (activity.windowRef !== record.windowRef || activity.sessionId !== record.sessionId) return null;
+  if (typeof activity.recordedAt !== 'string' || !activity.recordedAt) return null;
+  return activity;
+}
+
 function readTail(file, maxBytes = TAIL_BYTES, fsImpl = fs) {
   const fd = fsImpl.openSync(file, 'r');
   try {
@@ -186,6 +196,6 @@ function rotateBody(agent, measurement, handoffDir, now = new Date()) {
 
 module.exports = {
   TAIL_BYTES, sessionDirectory, sessionRecordPath, readSessionRecord, writeSessionRecord,
-  invalidateMovedRecord, readTail, measureTokens, measureMarker, rotationRules, measure,
+  invalidateMovedRecord, sessionActivity, readTail, measureTokens, measureMarker, rotationRules, measure,
   rotateKey, rotateSourceState, rotateBody, formatMeasurement,
 };
