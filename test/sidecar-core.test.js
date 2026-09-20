@@ -108,6 +108,36 @@ test('the envelope tells the window where the answer goes', () => {
   assert.ok(!/ say --as/.test(dm));
 });
 
+test('delivery batches consecutive group messages but never folds in a direct message', () => {
+  const rows = [
+    { id: 'other', agent: 'builder', kind: 'group' },
+    { id: 'g1', agent: 'architect', kind: 'group' },
+    { id: 'g2', agent: 'architect', kind: 'group' },
+    { id: 'dm', agent: 'architect', kind: 'dm' },
+    { id: 'g3', agent: 'architect', kind: 'group' },
+  ];
+  assert.deepEqual(core.nextDeliverableBatch(rows, 'architect').map((item) => item.id), ['g1', 'g2']);
+  assert.deepEqual(core.nextDeliverableBatch(rows.slice(3), 'architect').map((item) => item.id), ['dm']);
+  assert.deepEqual(core.nextDeliverableBatch(rows.slice(4), 'architect').map((item) => item.id), ['g3']);
+  assert.deepEqual(core.nextDeliverableBatch(rows, 'architect', false).map((item) => item.id), ['g1']);
+});
+
+test('one-item batch envelopes stay byte-for-byte compatible and group batches reply once', () => {
+  const one = { kind: 'group', sender: 'human', content: 'hi', queuedAt: 'T1' };
+  assert.equal(
+    core.batchEnvelope({ items: [one], agent: 'architect' }),
+    '[group] human: hi\n  — reply with: mousecrew say --as architect "..."',
+  );
+
+  const text = core.batchEnvelope({
+    agent: 'architect',
+    items: [one, { kind: 'group', sender: 'builder', content: 'there', queuedAt: 'T2' }],
+  });
+  assert.match(text, /2 messages delivered together/);
+  assert.ok(text.indexOf('human · T1') < text.indexOf('builder · T2'));
+  assert.equal((text.match(/reply with:/g) || []).length, 1);
+});
+
 // ---------- window resolution ----------
 
 test('a window is found by the identity it claims', () => {
