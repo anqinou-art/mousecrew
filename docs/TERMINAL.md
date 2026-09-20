@@ -54,7 +54,7 @@ group message
    → who is addressed?          (ids normalised first — see below)
    → which window claims them?  (looked up fresh, never cached)
    → is that window busy?       (read the screen)
-        busy  → wait, retry, and give up after 10 minutes
+        busy  → wait; after 10 minutes, force one delivery attempt
         free  → batch consecutive group messages, type once, press Enter
 ```
 
@@ -77,11 +77,13 @@ like work.
 The status a dashboard shows comes from the same reading, so it cannot contradict what
 delivery is doing.
 
-**Messages expire after ten minutes.** Not tidiness: a window busy for an hour comes back
-to twenty instructions from twenty minutes ago and starts answering questions that were
-settled long since — worse than silence, because it looks like engagement. The group
-history is the source of truth and can be re-read on demand. An instruction that was
-followed cannot be un-followed.
+**A message blocked by a busy window gets one forced attempt after ten minutes.** This can
+interrupt work, deliberately: one interruption is preferable to a continuously busy agent
+never receiving anything. The attempt is recorded before text is sent, so a failure or
+restart cannot turn the two-minute `delivery.forcedGraceMs` window into a retry loop. Once
+that grace period ends, the message expires. A message with no window, or one that remained
+queued while the window was idle, expires without a forced attempt. Set
+`delivery.forceOnExpiry` to `false` to expire every message at the original cutoff.
 
 A dropped *group* message is still in the group history. A dropped *direct* message looks,
 from the sender's side, exactly like being ignored — so that one is reported back, and shows
@@ -110,10 +112,10 @@ the same roster. Not a convention — there is no second table to drift.
 
 Two layers, and they answer different questions.
 
-**Structured events** carry every decision the sidecar makes — queued, busy-wait, injected,
-expired, no-window. Assertions and mutations all target this layer, against an in-memory
-adapter. A screen assertion answers two questions at once (did we do the right thing, and
-did the terminal render it) and a red one cannot tell you which.
+**Structured events** carry every decision the sidecar makes — queued, busy-wait, forced,
+injected, forced-injected, expired, no-window. Assertions and mutations all target this
+layer, against an in-memory adapter. A screen assertion answers two questions at once (did
+we do the right thing, and did the terminal render it) and a red one cannot tell you which.
 
 **One live test** reads a real screen (`test/terminal-live.test.js`). It exists for the one
 question events cannot answer: *do the characters actually arrive*. An adapter reporting "I
@@ -151,10 +153,9 @@ started from inside cmux.
 
 ## Known limitations
 
-- **A window that is always busy never receives anything.** Injection happens only when the
-  window is free, and a window doing continuous work is never free; those messages expire.
-  Group history still has them and undelivered direct messages are reported — but *"your
-  message was dropped because you were working"* is not solved.
+- **Forced delivery can interrupt active work.** It happens at most once per queued message
+  or eligible batch, after the normal ten-minute wait. Disabling `delivery.forceOnExpiry`
+  restores expiry without interruption.
 - **`@mentions` are matched as plain substrings.** Quoting a chat log or a code sample that
   contains `@name` really will wake that person. It bites hardest when discussing this
   mechanism, since any worked example contains mentions.

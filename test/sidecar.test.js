@@ -329,27 +329,130 @@ test('batchGroup false preserves one-message-per-pass delivery', async () => {
 
 // ---------- shelf life ----------
 
-test('a message that waited too long is dropped, and the drop is reported', async () => {
+test('a message held by a busy window for ten minutes is forced once and delivered', async () => {
   const h = primed(harness({ windows: [{ ref: '%1', identity: 'lead', screen: 'busy (esc to interrupt)' }] }));
   h.sc.ingest([msg('human', '@lead urgent an hour ago')], 'sse');
   await h.sc.deliver();
   h.advance(11 * 60 * 1000);
   await h.sc.deliver();
 
-  assert.equal(h.of('expired').length, 1);
+  assert.equal(h.adapter.__test.sentTo('%1').length, 1);
+  assert.equal(h.of('forced').length, 1);
+  assert.equal(h.of('forced-injected')[0].count, 1);
   assert.equal(h.sc.state.pending.length, 0);
 });
 
-test('an expired direct message is acknowledged back; a group one is not', async () => {
+test('a forced group batch does not carry a fresh group message through the busy gate', async () => {
+  const h = primed(harness({ windows: [{ ref: '%1', identity: 'lead', screen: 'busy (esc to interrupt)' }] }));
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'one', content: 'stale and forced' });
+  h.advance(11 * 60 * 1000);
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'two', content: 'fresh and waiting' });
+
+  await h.sc.deliver();
+
+  const sent = h.adapter.__test.sentTo('%1');
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /stale and forced/);
+  assert.doesNotMatch(sent[0], /fresh and waiting/);
+  assert.deepEqual(h.sc.state.pending.map((item) => item.content), ['fresh and waiting']);
+});
+
+test('an expired direct message with no window is acknowledged without a forced attempt', async () => {
   // A dropped group message is still in the group history. A dropped direct message looks,
   // from the sender's side, exactly like being ignored.
-  const h = primed(harness({ windows: [{ ref: '%1', identity: 'lead', screen: 'busy (esc to interrupt)' }] }));
+  const h = primed(harness({ windows: [{ ref: '%2', identity: 'builder', screen: '> ' }] }));
   h.sc.ingestDirect({ target: 'architect', dmId: 'dm-1', sender: 'human', content: 'just between us' });
-  h.sc.ingest([msg('human', '@lead group thing')], 'sse');
   h.advance(11 * 60 * 1000);
   await h.sc.deliver();
 
   assert.deepEqual(h.acks, [{ agent: 'architect', dmId: 'dm-1', status: 'expired' }]);
+  assert.equal(h.of('forced').length, 0);
+  assert.equal(h.sc.state.pending.length, 0);
+});
+
+test('a failed forced attempt is persisted first, never retried, then expires after grace', async () => {
+  const h = primed(harness({
+    windows: [{ ref: '%1', identity: 'lead', screen: 'busy (esc to interrupt)' }],
+    options: { forcedGraceMs: 120000 },
+  }));
+  h.sc.ingestDirect({ target: 'architect', dmId: 'dm-force-fail', sender: 'human', content: 'important' });
+  h.advance(11 * 60 * 1000);
+  let attempts = 0;
+  let persisted;
+  h.adapter.sendText = async () => {
+    attempts += 1;
+    persisted = JSON.parse(fs.readFileSync(h.sc.statePath, 'utf8'));
+    throw new Error('terminal write failed');
+  };
+
+  await h.sc.deliver();
+
+  assert.ok(persisted.pending[0].forcedTriedAt, 'the attempt is durable before terminal IO');
+  assert.equal(attempts, 1);
+  assert.equal(h.sc.state.pending.length, 1);
+  assert.equal(h.acks.length, 0);
+
+  h.adapter.__test.setScreen('%1', '> ');
+  await h.sc.deliver();
+  assert.equal(attempts, 1, 'becoming idle cannot turn the spent forced attempt into a normal retry');
+
+  h.advance(120001);
+  await h.sc.deliver();
+  assert.equal(attempts, 1);
+  assert.equal(h.sc.state.pending.length, 0);
+  assert.deepEqual(h.acks, [{ agent: 'architect', dmId: 'dm-force-fail', status: 'expired' }]);
+});
+
+test('three expired direct messages merge into one forced injection and three receipts', async () => {
+  const h = primed(harness({ windows: [{ ref: '%1', identity: 'lead', screen: 'busy (esc to interrupt)' }] }));
+  for (const [dmId, content] of [['dm-a', 'first'], ['dm-b', 'second'], ['dm-c', 'third']]) {
+    h.sc.ingestDirect({ target: 'architect', dmId, sender: 'human', content });
+  }
+  h.advance(11 * 60 * 1000);
+
+  await h.sc.deliver();
+
+  const sent = h.adapter.__test.sentTo('%1');
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /first[\s\S]*second[\s\S]*third/);
+  assert.equal(h.of('forced-injected')[0].count, 3);
+  assert.deepEqual(h.acks, [
+    { agent: 'architect', dmId: 'dm-a', status: 'delivered' },
+    { agent: 'architect', dmId: 'dm-b', status: 'delivered' },
+    { agent: 'architect', dmId: 'dm-c', status: 'delivered' },
+  ]);
+});
+
+test('an idle injection failure expires without gaining forced delivery', async () => {
+  const h = primed(harness());
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'human', content: 'cannot inject' });
+  let attempts = 0;
+  h.adapter.sendText = async () => { attempts += 1; throw new Error('terminal write failed'); };
+  await h.sc.deliver();
+  h.advance(11 * 60 * 1000);
+
+  await h.sc.deliver();
+
+  assert.equal(attempts, 1);
+  assert.equal(h.of('forced').length, 0);
+  assert.equal(h.of('expired').length, 1);
+  assert.equal(h.sc.state.pending.length, 0);
+});
+
+test('forceOnExpiry false preserves immediate expiry without interruption', async () => {
+  const h = primed(harness({
+    windows: [{ ref: '%1', identity: 'lead', screen: 'busy (esc to interrupt)' }],
+    options: { forceOnExpiry: false },
+  }));
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'human', content: 'old behaviour' });
+  h.advance(11 * 60 * 1000);
+
+  await h.sc.deliver();
+
+  assert.equal(h.adapter.__test.sentTo('%1').length, 0);
+  assert.equal(h.of('forced').length, 0);
+  assert.equal(h.of('expired').length, 1);
+  assert.equal(h.sc.state.pending.length, 0);
 });
 
 test('a delivered direct message is acknowledged too', async () => {
@@ -420,7 +523,10 @@ test('a receipt that cannot be sent is kept and retried, not lost', async () => 
   // exactly like being ignored. A receipt attempted once and dropped on failure puts the
   // system back in precisely that state — and by then the queue entry is gone, so nothing
   // would ever try again.
-  const h = primed(harness({ windows: [{ ref: '%1', identity: 'lead', screen: 'busy (esc to interrupt)' }] }));
+  const h = primed(harness({
+    windows: [{ ref: '%1', identity: 'lead', screen: 'busy (esc to interrupt)' }],
+    options: { forceOnExpiry: false },
+  }));
   let failing = true;
   h.sc.client.ack = async (agent, dmId, status) => {
     if (failing) throw new Error('server unreachable');
@@ -442,7 +548,10 @@ test('a receipt that cannot be sent is kept and retried, not lost', async () => 
 });
 
 test('an owed receipt survives a restart', async () => {
-  const h = primed(harness({ windows: [{ ref: '%1', identity: 'lead', screen: 'busy (esc to interrupt)' }] }));
+  const h = primed(harness({
+    windows: [{ ref: '%1', identity: 'lead', screen: 'busy (esc to interrupt)' }],
+    options: { forceOnExpiry: false },
+  }));
   h.sc.client.ack = async () => { throw new Error('down'); };
   h.sc.ingestDirect({ target: 'architect', dmId: 'dm-10', sender: 'human', content: 'hello' });
   h.advance(11 * 60 * 1000);

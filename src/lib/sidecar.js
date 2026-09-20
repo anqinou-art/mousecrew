@@ -25,6 +25,8 @@ const DEFAULTS = {
   maxPending: 200,
   batchGroup: core.DEFAULT_BATCH_GROUP,
   inlineLimit: core.DEFAULT_INLINE_LIMIT,
+  forceOnExpiry: core.DEFAULT_FORCE_ON_EXPIRY,
+  forcedGraceMs: core.DEFAULT_FORCED_GRACE_MS,
   screenLines: 12,
   busyPattern: 'esc to interrupt',
 };
@@ -69,13 +71,15 @@ class Sidecar extends EventEmitter {
   }
 
   _saveState() {
-    if (!this.statePath) return;
+    if (!this.statePath) return false;
     try {
       fs.mkdirSync(path.dirname(this.statePath), { recursive: true, mode: 0o700 });
       // 0600: the queue holds message bodies, which are as private as the messages were.
       fs.writeFileSync(this.statePath, JSON.stringify({ ...this.state, updatedAt: new Date(this.now()).toISOString() }, null, 2), { mode: 0o600 });
+      return true;
     } catch (e) {
       this.emit('event', { type: 'state-save-failed', error: e.message });
+      return false;
     }
   }
 
@@ -141,8 +145,10 @@ class Sidecar extends EventEmitter {
     const { kept, dropped } = core.capPending(this.state.pending, this.opt.maxPending);
     this.state.pending = kept;
     for (const d of dropped) {
-      this.emit('event', { type: 'dropped-overflow', agent: d.agent, kind: d.kind });
-      if (d.kind === 'dm' && d.dmId) this._queueAck(d.dmId, d.agent, 'expired');
+      this.emit('event', {
+        type: 'dropped-overflow', agent: d.agent, kind: d.kind, count: this._itemCount(d),
+      });
+      this._queueAcksFor(d, 'expired');
     }
     this.emit('event', { type: 'queued', agent: entry.agent, kind: entry.kind, depth: this.state.pending.length });
     return entry;
@@ -150,18 +156,58 @@ class Sidecar extends EventEmitter {
 
   // ---------- delivery ----------
 
-  /** Drop everything past its shelf life, reporting each one. */
-  pruneStale() {
+  _itemCount(item) {
+    return item && Array.isArray(item.mergedFrom) ? item.mergedFrom.length : 1;
+  }
+
+  _queueAcksFor(item, status) {
+    if (!item || item.kind !== 'dm') return;
+    for (const source of item.mergedFrom || [item]) {
+      if (source.dmId) this._queueAck(source.dmId, item.agent, status);
+    }
+  }
+
+  /** Resolve expired items for one agent after the window and busy state are known. */
+  pruneStale({ agent = null, force = false } = {}) {
     const now = this.now();
-    const expired = core.selectExpired(this.state.pending, now, this.opt.stalePendingMs);
-    if (!expired.length) return [];
-    this.state.pending = core.filterFresh(this.state.pending, now, this.opt.stalePendingMs);
+    const belongs = (item) => agent === null || item.agent === agent;
+    const candidates = this.state.pending.filter(belongs);
+    const expiring = core.selectExpired(
+      candidates, now, this.opt.stalePendingMs, this.opt.forcedGraceMs,
+    );
+    let forced = [];
+    if (force && this.opt.forceOnExpiry && expiring.length) {
+      const marked = core.markForcedDeliveries(expiring, now);
+      forced = marked.forced;
+      if (marked.absorbed.length) {
+        const absorbed = new Set(marked.absorbed);
+        this.state.pending = this.state.pending.filter((item) => !absorbed.has(item));
+      }
+      for (const item of forced) {
+        this.emit('event', {
+          type: 'forced', agent: item.agent, kind: item.kind, count: this._itemCount(item),
+        });
+      }
+    }
+
+    const current = this.state.pending.filter(belongs);
+    const expired = core.selectExpired(
+      current, now, this.opt.stalePendingMs, this.opt.forcedGraceMs,
+    );
+    if (!forced.length && !expired.length) return [];
+    if (expired.length) {
+      const expiredSet = new Set(expired);
+      this.state.pending = this.state.pending.filter((item) => !expiredSet.has(item));
+    }
     for (const item of expired) {
-      this.emit('event', { type: 'expired', agent: item.agent, kind: item.kind, queuedAt: item.queuedAt });
+      this.emit('event', {
+        type: 'expired', agent: item.agent, kind: item.kind,
+        queuedAt: item.queuedAt, count: this._itemCount(item),
+      });
       // A dropped group message still exists in the group history. A dropped direct
       // message looks, from the sender's side, exactly like being ignored — so that one
       // has to be reported back.
-      if (item.kind === 'dm' && item.dmId) this._queueAck(item.dmId, item.agent, 'expired');
+      this._queueAcksFor(item, 'expired');
     }
     this._saveState();
     return expired;
@@ -236,7 +282,6 @@ class Sidecar extends EventEmitter {
    * free, type the oldest item in.
    */
   async deliver() {
-    this.pruneStale();
     // Receipts owed from earlier passes go out first: a delivery attempt is the only thing
     // that runs on a timer here, so it is also the retry loop.
     await this.flushAcks();
@@ -247,38 +292,60 @@ class Sidecar extends EventEmitter {
       windows = await this.adapter.listWindows();
     } catch (e) {
       this.emit('event', { type: 'list-failed', error: e.message });
+      this.pruneStale();
+      await this.flushAcks();
       return [];
     }
 
     const delivered = [];
     for (const agent of [...new Set(this.state.pending.map((p) => p.agent))]) {
       if (this._draining.has(agent)) continue;
-      const batch = core.nextDeliverableBatch(this.state.pending, agent, this.opt.batchGroup);
-      const item = batch[0];
-      if (!item) continue;
 
       const cfg = this.byId.get(agent);
       const identityName = (cfg && cfg.terminal && cfg.terminal.target) || (cfg && cfg.displayName) || agent;
       const found = core.resolveWindow(windows, identityName);
       if (!found.ref) {
+        this.pruneStale({ agent });
         // Not an error: a window that has not registered yet is a window that will. The
         // item stays queued and the shelf life decides how long that hope lasts.
-        this.emit('event', { type: 'no-window', agent, reason: found.reason, candidates: found.candidates });
+        if (this.state.pending.some((item) => item.agent === agent)) {
+          this.emit('event', { type: 'no-window', agent, reason: found.reason, candidates: found.candidates });
+        }
         continue;
       }
 
       const pattern = (cfg && cfg.terminal && cfg.terminal.busyPattern) || this.opt.busyPattern;
       let screen = '';
       try { screen = await this.adapter.readScreen(found.ref, this.opt.screenLines); }
-      catch (e) { this.emit('event', { type: 'read-failed', agent, ref: found.ref, error: e.message }); continue; }
+      catch (e) {
+        this.emit('event', { type: 'read-failed', agent, ref: found.ref, error: e.message });
+        this.pruneStale({ agent });
+        continue;
+      }
 
-      if (core.isBusy(screen, pattern)) {
+      const busy = core.isBusy(screen, pattern);
+      this.pruneStale({ agent, force: busy });
+      const batch = core.nextDeliverableBatch(this.state.pending, agent, this.opt.batchGroup);
+      const item = batch[0];
+      if (!item) continue;
+      const plan = core.planDelivery(item, busy);
+      if (plan === 'wait_forced_expiry') continue;
+      if (plan === 'wait_busy') {
         this.emit('event', { type: 'busy-wait', agent, ref: found.ref });
         continue;
       }
 
       this._draining.add(agent);
       try {
+        const forced = plan === 'inject_forced';
+        if (forced) {
+          const triedAt = new Date(this.now()).toISOString();
+          for (const entry of batch) entry.forcedTriedAt = triedAt;
+          if (!this._saveState()) {
+            this.emit('event', { type: 'forced-save-failed', agent, ref: found.ref });
+            continue;
+          }
+        }
         const body = core.batchBody(batch);
         const fullText = core.batchEnvelope({ items: batch, agent, cli: this.opt.cli });
         const bodyFile = body.length > this.opt.inlineLimit
@@ -297,16 +364,20 @@ class Sidecar extends EventEmitter {
         const deliveredBatch = new Set(batch);
         this.state.pending = this.state.pending.filter((p) => !deliveredBatch.has(p));
         this._saveState();
+        const count = batch.reduce((sum, entry) => sum + this._itemCount(entry), 0);
         this.emit('event', {
-          type: 'injected', agent, ref: found.ref, kind: item.kind,
-          chars: text.length, count: batch.length,
+          type: forced ? 'forced-injected' : 'injected', agent, ref: found.ref, kind: item.kind,
+          chars: text.length, count, forced,
         });
-        if (item.kind === 'dm' && item.dmId) this._queueAck(item.dmId, agent, 'delivered');
-        delivered.push({ agent, ref: found.ref, kind: item.kind, count: batch.length });
+        for (const entry of batch) this._queueAcksFor(entry, 'delivered');
+        delivered.push({ agent, ref: found.ref, kind: item.kind, count, forced });
       } catch (e) {
         // Injection failed: keep the item queued. Dropping it here would lose a message
         // for a reason the sender can never discover.
-        this.emit('event', { type: 'inject-failed', agent, ref: found.ref, error: e.message });
+        this.emit('event', {
+          type: 'inject-failed', agent, ref: found.ref,
+          forced: plan === 'inject_forced', error: e.message,
+        });
       } finally {
         this._draining.delete(agent);
       }
