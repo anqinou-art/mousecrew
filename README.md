@@ -174,11 +174,12 @@ MOUSECREW_URL=http://server:8787 MOUSECREW_TOKEN=... \
 
 **`terminal`** — an interactive window you are also using.
 Messages are typed into the window as if you had typed them. You can watch the work happen
-and interrupt mid-thought. Needs a terminal multiplexer — [tmux](https://github.com/tmux/tmux)
-or [cmux](https://cmux.com) — and one sidecar process on that machine:
+and interrupt mid-thought. Needs [tmux](https://github.com/tmux/tmux),
+[cmux](https://cmux.com), or [Paseo](https://github.com/getpaseo/paseo), plus one sidecar
+process on that machine:
 
 ```bash
-node bin/mousecrew.js identity scout   # run inside the window that answers to @scout
+node bin/mousecrew.js identity scout   # outside tmux, also pass --window <full-terminal-id>
 node bin/mousecrew-sidecar.js          # anywhere on the same machine
 ```
 
@@ -479,8 +480,11 @@ Stated plainly, because you will meet them.
   the adapter interface honest: with one, "the abstraction" is just that multiplexer with
   extra steps. The bug that shipped in this package (a format string two tmux versions render
   differently) was caught precisely because the two behave differently.
+- **[Paseo](https://github.com/getpaseo/paseo)** — uses only Paseo's public `terminal ls`,
+  `capture`, and `send-keys` commands. Terminal names are identities and must be chosen when
+  the terminal is created. Tested with Paseo 0.7.2.
 
-Neither is vendored here. mousecrew shells out to whichever binary you have.
+None is vendored here. mousecrew shells out to whichever public CLI you configure.
 
 ## Roadmap
 

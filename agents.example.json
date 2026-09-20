@@ -55,7 +55,8 @@
       "// inputBox": "Optional: claude-code delays delivery while its input text is changing.",
       "// rotation": "Optional: any configured rule reaching its limit queues a reminder. tokens reads Claude-style usage; marker counts matching JSONL lines.",
       "terminal": {
-        "adapter": "tmux",
+        "// paseo": "Create it first with: paseo terminal create --name scout. The fixed terminal name is its identity.",
+        "adapter": "paseo",
         "target": "scout",
         "inputBox": "claude-code",
         "rotation": [
