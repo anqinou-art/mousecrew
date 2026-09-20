@@ -252,6 +252,22 @@ test('rotate uses the graceful endpoint and does not claim an unverified success
   assert.doesNotMatch(result.stdout, /success|succeeded/i);
 });
 
+test('status distinguishes verifying, verified, late verified, and failed rotations', async (t) => {
+  const api = await scriptedApi(t, [{ body: {
+    checking: { transport: 'local', state: 'starting', rotationStatus: 'verifying', lastRotate: null },
+    complete: { transport: 'local', state: 'idle', rotationStatus: 'verified', lastRotate: { ok: true, from: 'a', to: 'b' } },
+    late: { transport: 'local', state: 'idle', rotationStatus: 'verified_late', lastRotate: { ok: true, late: true, from: 'c', to: 'd' } },
+    failed: { transport: 'local', state: 'idle', rotationStatus: 'failed', lastRotate: { ok: false, from: 'e', to: null } },
+  } }]);
+  const result = await runCli(['status'], api.base);
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /checking[\s\S]*rotation verifying/);
+  assert.match(result.stdout, /complete[\s\S]*last rotation verified: a -> b/);
+  assert.match(result.stdout, /late[\s\S]*last rotation verified late: c -> d/);
+  assert.match(result.stdout, /failed[\s\S]*last rotation failed: e -> -/);
+});
+
 test('session-record accepts the three window sources, replaces the agent record, and keeps it private', async (t) => {
   const root = localCrewRoot(t);
   const env = { MOUSECREW_ROOT: root, MOUSECREW_WINDOW: '%env', TMUX_PANE: '%tmux' };

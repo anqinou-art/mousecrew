@@ -37,7 +37,7 @@ const DEFAULTS = {
   rotationPollMs: 5 * 60 * 1000,
   handoffDir: path.join(process.cwd(), 'data', 'handoff'),
   screenLines: 12,
-  busyPattern: 'esc to interrupt',
+  busyPattern: core.DEFAULT_BUSY_PATTERN,
 };
 
 class Sidecar extends EventEmitter {
@@ -567,7 +567,8 @@ class Sidecar extends EventEmitter {
         continue;
       }
 
-      const pattern = (cfg && cfg.terminal && cfg.terminal.busyPattern) || this.opt.busyPattern;
+      const pattern = cfg && cfg.terminal && cfg.terminal.busyPattern !== undefined
+        ? cfg.terminal.busyPattern : this.opt.busyPattern;
       let screen = '';
       try { screen = await this.adapter.readScreen(found.ref, this.opt.screenLines); }
       catch (e) {
@@ -731,7 +732,8 @@ class Sidecar extends EventEmitter {
       let screen = '';
       try { screen = await this.adapter.readScreen(found.ref, this.opt.screenLines); }
       catch { report[cfg.id] = { state: 'stopped', detail: 'unreadable' }; continue; }
-      const pattern = (cfg.terminal && cfg.terminal.busyPattern) || this.opt.busyPattern;
+      const pattern = cfg.terminal && cfg.terminal.busyPattern !== undefined
+        ? cfg.terminal.busyPattern : this.opt.busyPattern;
       report[cfg.id] = { state: core.isBusy(screen, pattern) ? 'busy' : 'idle', detail: null };
     }
 

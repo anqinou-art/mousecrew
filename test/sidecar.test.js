@@ -1067,13 +1067,32 @@ test('presence: no window is "stopped", not "idle"', async () => {
 test('presence uses the same screen reading as delivery back-pressure', async () => {
   // So the dashboard can never say "idle" about an agent the sidecar is holding messages
   // back from.
-  const h = primed(harness({ windows: [{ ref: '%1', identity: 'lead', screen: 'running (esc to interrupt)' }] }));
+  const h = primed(harness({ windows: [{
+    ref: '%1', identity: 'lead', screen: '✢ Harmonizing… (52s · ↓ 2.5k tokens · thinking)',
+  }] }));
   const report = await h.sc.reportPresence();
   assert.equal(report.architect.state, 'busy');
 
   h.sc.ingest([msg('human', '@lead hi')], 'sse');
   await h.sc.deliver();
   assert.equal(h.of('busy-wait').length, 1, 'delivery agrees with the report');
+});
+
+test('an agent busy marker replaces the built-in marker instead of being combined with it', async () => {
+  const crew = [normalizeAgent({
+    id: 'custom', transport: 'terminal',
+    terminal: { adapter: 'fake', target: 'custom', busyPattern: 'CUSTOM ACTIVE' },
+  })];
+  const h = harness({
+    crew,
+    windows: [{
+      ref: '%1', identity: 'custom', screen: '✢ Harmonizing… (52s · ↓ 2.5k tokens · thinking)',
+    }],
+  });
+  assert.equal((await h.sc.reportPresence()).custom.state, 'idle');
+
+  h.adapter.__test.setScreen('%1', 'CUSTOM ACTIVE');
+  assert.equal((await h.sc.reportPresence()).custom.state, 'busy');
 });
 
 test('presence only covers terminal crew members', async () => {
