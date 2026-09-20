@@ -210,6 +210,7 @@ test('graceful rotation waits for the current answer, deduplicates requests, and
     { ...rt.status().lastRotate, at: 'ignored' },
     { at: 'ignored', ok: true, from: 'old-session', to: 'new-session' },
   );
+  assert.equal(rt.status().rotationStatus, 'verified');
   assert.equal(
     JSON.parse(fs.readFileSync(path.join(dir, 'session_tester.json'), 'utf8')).sessionId,
     'new-session',
@@ -302,14 +303,77 @@ test('rotation fails for the same session id and stale output cannot settle a re
   rt.destroy();
 });
 
-test('rotation verification times out without claiming success', async () => {
-  const { rt } = makeRuntime({}, { rotateVerifyMs: 10 });
+test('a new session id arriving after the deadline corrects rotation to late success', async () => {
+  const { rt, procs } = makeRuntime({ rotateVerifyMs: 10 });
   rt.sessionId = 'old-session';
   assert.deepEqual(rt.rotate(), { queued: false, rotating: true });
+  assert.equal(rt.status().rotationStatus, 'verifying');
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(rt.lastRotate.ok, false);
   assert.equal(rt.lastRotate.from, 'old-session');
   assert.equal(rt.lastRotate.to, null);
+  assert.equal(rt.status().rotationStatus, 'failed');
+
+  procs[0].say({ type: 'system', subtype: 'init', session_id: 'new-session' });
+  assert.equal(rt.lastRotate.ok, true);
+  assert.equal(rt.lastRotate.to, 'new-session');
+  assert.equal(rt.lastRotate.late, true);
+  assert.equal(rt.status().rotationStatus, 'verified_late');
+  rt.destroy();
+});
+
+test('the old session id arriving after the deadline keeps the failed result', async () => {
+  const { rt, procs } = makeRuntime({ rotateVerifyMs: 10 });
+  rt.sessionId = 'old-session';
+  rt.rotate();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const failedAt = rt.lastRotate.at;
+
+  procs[0].say({ type: 'system', subtype: 'init', session_id: 'old-session' });
+  assert.deepEqual(rt.lastRotate, {
+    at: failedAt, ok: false, from: 'old-session', to: null,
+  });
+  assert.equal(rt.status().rotationStatus, 'failed');
+  rt.destroy();
+});
+
+test('a forced new session supersedes timed-out graceful verification', async () => {
+  const { rt, procs } = makeRuntime({ rotateVerifyMs: 10 });
+  rt.sessionId = 'original';
+  rt.rotate();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const gracefulFailure = { ...rt.lastRotate };
+
+  rt.newSession();
+  rt.start();
+  procs[1].say({ type: 'system', subtype: 'init', session_id: 'forced-new' });
+
+  assert.equal(rt.sessionId, 'forced-new', 'the forced replacement still owns the session');
+  assert.deepEqual(rt.lastRotate, gracefulFailure, 'its init cannot settle the earlier request');
+  assert.equal(rt.status().rotationStatus, 'failed');
+  const work = rt.send('FORCED WORK');
+  assert.equal(JSON.parse(procs[1].written[0]).message.content, 'FORCED WORK',
+    'the superseded graceful request cannot leave its briefing behind');
+  procs[1].say({ type: 'result', result: 'done', session_id: 'forced-new' });
+  await work;
+  rt.destroy();
+});
+
+test('a forced new session also cancels a graceful request still queued behind work', async () => {
+  const { rt, procs } = makeRuntime();
+  const current = rt.send('current work');
+  await new Promise((resolve) => setImmediate(resolve));
+  procs[0].say({ type: 'system', subtype: 'init', session_id: 'original' });
+  assert.deepEqual(rt.rotate(), { queued: true });
+
+  rt.newSession();
+  await assert.rejects(current, /rotate to a fresh session/);
+  assert.equal(rt.status().rotateQueued, false);
+  rt.start();
+  procs[1].say({ type: 'system', subtype: 'init', session_id: 'forced-new' });
+
+  assert.equal(rt.sessionId, 'forced-new');
+  assert.equal(procs[1].killed, undefined, 'the cancelled graceful request cannot rotate again');
   rt.destroy();
 });
 

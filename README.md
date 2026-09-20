@@ -125,7 +125,10 @@ not deployment: mousecrew still does not pull, deploy, or restart anything.
 For a session-aware local agent, `mousecrew rotate <agent>` waits for the current turn to
 finish, starts a fresh session before queued messages drain, and verifies that the new
 process reports a different session id. The command only says whether rotation started or
-was queued; check `mousecrew status` for `lastRotate` and its verified result. The older
+was queued; check `mousecrew status` for a verifying, verified, verified-late, or failed
+result. Verification waits `rotateVerifyMs` (60 seconds by default) for that local agent.
+A timeout records a provisional failure, which a later different session id corrects to
+verified-late. The older
 `POST /api/agents/:id/session/new` endpoint remains the force option: it interrupts a
 running turn immediately.
 

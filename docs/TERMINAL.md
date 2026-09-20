@@ -27,7 +27,7 @@ answer is arrived at rather than produced — that is worth the fragility.
 ```jsonc
 // agents.json
 { "id": "scout", "displayName": "scout", "transport": "terminal",
-  "terminal": { "adapter": "tmux", "target": "scout", "busyPattern": "esc to interrupt" } }
+  "terminal": { "adapter": "tmux", "target": "scout" } }
 ```
 
 Then, **inside the window you want to use**:
@@ -141,6 +141,13 @@ reliable: measured side by side for twenty minutes, one CLI's "am I busy" field 
 returned to idle after finishing while another's did. Same field, two behaviours. A status
 that is wrong in the *still working* direction is worse than no status, because it looks
 like work.
+
+This is a screen heuristic, so a CLI layout change can make it miss busy work and inject
+messages mid-turn. After upgrading a CLI, run a deliberately slow turn and check
+`mousecrew status` while it is running; the terminal agent should report `busy`. If a
+message is waiting, the sidecar should also emit `busy-wait`. Set that agent's
+`terminal.busyPattern` when its screen uses a different marker; an explicit pattern always
+overrides the built-in Claude Code default.
 
 The status a dashboard shows comes from the same reading, so it cannot contradict what
 delivery is doing.
@@ -265,7 +272,7 @@ paseo terminal create --name scout
 
 ```jsonc
 { "id": "scout", "transport": "terminal",
-  "terminal": { "adapter": "paseo", "target": "scout", "busyPattern": "esc to interrupt" } }
+  "terminal": { "adapter": "paseo", "target": "scout" } }
 ```
 
 Paseo chooses the name when it creates the terminal and cannot rename or clear it later.

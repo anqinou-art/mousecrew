@@ -60,7 +60,7 @@ class AgentRuntime extends EventEmitter {
     this._rotateVerifyTimer = null;
     this._pendingBriefing = null;
     this.lastRotate = null;
-    this._rotateVerifyMs = deps.rotateVerifyMs || 30_000;
+    this._rotateVerifyMs = deps.rotateVerifyMs ?? cfg.rotateVerifyMs;
     this._contextWatch = deps.contextWatch || {};
 
     this.contextLimit = cfg.contextLimit || 200_000;
@@ -98,6 +98,17 @@ class AgentRuntime extends EventEmitter {
 
   /** Drop the conversation and start a new one on next wake. This is "rotate window". */
   newSession() {
+    this._pendingRotate = null;
+    this._rotateVerify = null;
+    if (this._rotateVerifyTimer) {
+      clearTimeout(this._rotateVerifyTimer);
+      this._rotateVerifyTimer = null;
+    }
+    this._pendingBriefing = null;
+    return this._replaceSession();
+  }
+
+  _replaceSession() {
     const old = this.sessionId;
     this.sessionId = null;
     this.contextTokens = 0;
@@ -111,7 +122,9 @@ class AgentRuntime extends EventEmitter {
   /** Finish the current turn before replacing its process and session. */
   rotate() {
     if (this._pendingRotate) return { queued: true };
-    if (this._rotateVerify) return { queued: false, rotating: true };
+    if (this._rotateVerify && !this._rotateVerify.timedOut) {
+      return { queued: false, rotating: true };
+    }
     const request = { requestedAt: new Date().toISOString() };
     if (this.currentJob || this.state === 'busy') {
       this._pendingRotate = request;
@@ -129,24 +142,35 @@ class AgentRuntime extends EventEmitter {
       noHandoff: this._contextWatch.noHandoff,
       maxAgeDays: this._contextWatch.handoffMaxAgeDays,
     });
-    this._rotateVerifyTimer = setTimeout(() => this._settleRotate(null), this._rotateVerifyMs);
+    this._rotateVerifyTimer = setTimeout(() => this._timeoutRotate(), this._rotateVerifyMs);
     if (this._rotateVerifyTimer.unref) this._rotateVerifyTimer.unref();
 
     const hadProcess = !!this.proc;
-    this.newSession();
+    this._replaceSession();
     if (!hadProcess && this.cfg.runner !== 'exec') this.start();
   }
 
   _settleRotate(newId) {
     if (!this._rotateVerify) return;
-    const { from } = this._rotateVerify;
+    const { from, timedOut } = this._rotateVerify;
     this._rotateVerify = null;
     if (this._rotateVerifyTimer) {
       clearTimeout(this._rotateVerifyTimer);
       this._rotateVerifyTimer = null;
     }
     const ok = !!newId && newId !== from;
+    if (timedOut && !ok) return;
     this.lastRotate = { at: new Date().toISOString(), ok, from, to: newId || null };
+    if (timedOut) this.lastRotate.late = true;
+  }
+
+  _timeoutRotate() {
+    if (!this._rotateVerify || this._rotateVerify.timedOut) return;
+    this._rotateVerify.timedOut = true;
+    this._rotateVerifyTimer = null;
+    this.lastRotate = {
+      at: new Date().toISOString(), ok: false, from: this._rotateVerify.from, to: null,
+    };
   }
 
   // ---------- process lifecycle ----------
@@ -547,6 +571,11 @@ class AgentRuntime extends EventEmitter {
   }
 
   status() {
+    const rotationStatus = this._rotateVerify && !this._rotateVerify.timedOut
+      ? 'verifying'
+      : this.lastRotate && (this.lastRotate.ok
+        ? (this.lastRotate.late ? 'verified_late' : 'verified')
+        : 'failed');
     return {
       id: this.name,
       transport: 'local',
@@ -558,6 +587,7 @@ class AgentRuntime extends EventEmitter {
       context: { tokens: this.contextTokens, limit: this.contextLimit },
       sessionMessages: this.sessionMessages,
       lastRotate: this.lastRotate,
+      rotationStatus: rotationStatus || null,
       rotateQueued: !!this._pendingRotate,
       stats: this.stats,
     };

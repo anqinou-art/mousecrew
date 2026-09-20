@@ -576,8 +576,13 @@ async function main() {
         const ctx = v.context ? ` ctx ${Math.round((v.context.tokens || 0) / 1000)}k/${Math.round(v.context.limit / 1000)}k` : '';
         console.log(`  ${name.padEnd(12)} ${String(v.transport).padEnd(9)} ${String(v.state).padEnd(10)}${ctx}`);
         if (v.rotateQueued) console.log('               rotation queued');
-        if (v.lastRotate) {
-          console.log(`               last rotation ${v.lastRotate.ok ? 'verified' : 'failed'}: ${v.lastRotate.from || '-'} -> ${v.lastRotate.to || '-'}`);
+        if (v.rotationStatus === 'verifying') {
+          console.log('               rotation verifying');
+        } else if (v.lastRotate) {
+          const verdict = v.lastRotate.ok
+            ? (v.lastRotate.late ? 'verified late' : 'verified')
+            : 'failed';
+          console.log(`               last rotation ${verdict}: ${v.lastRotate.from || '-'} -> ${v.lastRotate.to || '-'}`);
         }
       }
       break;

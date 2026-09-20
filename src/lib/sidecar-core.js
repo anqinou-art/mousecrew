@@ -18,6 +18,7 @@ const DEFAULT_FORCE_ON_EXPIRY = true;
 const DEFAULT_FORCED_GRACE_MS = 2 * 60 * 1000;
 const DEFAULT_WAKE_MAX_CONTENT = 600;
 const DEFAULT_WAKE_SETTLE_MS = 5 * 1000;
+const DEFAULT_BUSY_PATTERN = 'esc to interrupt|(?:^|\\n)\\s*✢\\s+[^\\r\\n]*…\\s*\\([^\\r\\n)]*\\btokens?(?:\\s*·[^\\r\\n)]*)?\\)';
 
 // The separator is a NUL byte, written as an escape on purpose: a literal one in the
 // source makes git treat this whole file as binary, and `git diff` then answers
@@ -288,7 +289,7 @@ function resolveWindow(windows, identityName) {
 module.exports = {
   DEFAULT_BATCH_GROUP, DEFAULT_INLINE_LIMIT,
   DEFAULT_FORCE_ON_EXPIRY, DEFAULT_FORCED_GRACE_MS,
-  DEFAULT_WAKE_MAX_CONTENT, DEFAULT_WAKE_SETTLE_MS,
+  DEFAULT_WAKE_MAX_CONTENT, DEFAULT_WAKE_SETTLE_MS, DEFAULT_BUSY_PATTERN,
   fingerprint, normalizeMessage, messageKey, parseWakeRequest,
   mentionTargets, isBusy,
   filterFresh, selectExpired, capPending,
