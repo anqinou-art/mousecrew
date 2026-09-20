@@ -17,12 +17,23 @@ const { createNotifier } = require('./lib/notify');
 const { createRequireToken, readTokenFile, tokenMatches } = require('./lib/require-token');
 const { createGroupRouter } = require('./routes/group');
 const { createOrdersRouter } = require('./routes/orders');
+const { createProjectsRouter } = require('./routes/projects');
 const { createAgentsRouter } = require('./routes/agents');
 const { createThreadsRouter } = require('./routes/threads');
 const { createRemoteBridge } = require('./ws/remote-bridge');
 
 function build({ config, agents }) {
   const store = open(config.dbPath);
+  try {
+    store.db.transaction((projects) => {
+      for (const project of projects) {
+        store.project.upsert.run(project.id, project.name, project.prefix);
+      }
+    })(config.projects || []);
+  } catch (error) {
+    store.close();
+    throw error;
+  }
   const archive = createArchive(config.archivePath);
   const identity = buildIdentity(agents);
   const workspace = new WorkspaceRules(agents);
@@ -47,6 +58,7 @@ function build({ config, agents }) {
   app.get('/healthz', (req, res) => res.json({ ok: true, agents: agents.length }));
 
   app.use(createGroupRouter({ hub, dispatcher, identity, requireToken }));
+  app.use(createProjectsRouter({ store, config, requireToken }));
   const orders = createOrdersRouter({ store, identity, hub, workspace, notifier, requireToken, config });
   app.use(orders.router);
   app.use(createAgentsRouter({ manager, identity, store, requireToken, config }));

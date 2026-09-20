@@ -80,11 +80,19 @@ mousecrew on http://127.0.0.1:8787 — 3 agents registered
 Then drive it:
 
 ```bash
-node bin/mousecrew.js create --title "fix the login endpoint" --assignee backend --repo server -s me
-node bin/mousecrew.js say --as me "@backend see WO-001 when you get a chance"
-node bin/mousecrew.js list
+node bin/mousecrew.js projects
+node bin/mousecrew.js create -p app --title "fix the login endpoint" --assignee backend --repo server -s me
+node bin/mousecrew.js say --as me "@backend see APP-001 when you get a chance"
+node bin/mousecrew.js list -p app
 node bin/mousecrew.js status
 ```
+
+Projects come from `config.projects`, with one unique 2–5 letter uppercase prefix each.
+Orders are numbered independently per prefix from the greatest existing suffix, so `APP-001`
+and `DOC-001` can coexist and deleting an older row does not reuse its number. When projects
+are configured, creating an order requires `-p`; the server lists the valid ids if it is missing
+or unknown. Existing configurations without `projects` remain valid and keep using
+`orderPrefix` (or `WO`) without requiring a project.
 
 `bin/mousecrew.js` with no arguments prints every command.
 
@@ -217,6 +225,7 @@ All endpoints require `Authorization: Bearer <token>`. There is no grace mode.
 | `POST /api/group/chat` | a human speaks |
 | `POST /api/group/post` | an agent replies |
 | `GET/POST /api/orders` | list / create |
+| `GET /api/projects` | configured projects (read-only) |
 | `GET /api/orders/:id` | one order with timeline, logs, and immutable review snapshots |
 | `POST /api/orders/:id/transition` | move it; optional `commit_hash`, `git_branch`; review decisions include `audit_revision` |
 | `POST /api/orders/:id/pause` `/resume` `/assign` | blocking and assignment |

@@ -39,7 +39,7 @@ const REMOTE_GATE_CREW = [
 // assertion throws. Without that, a failing test leaves its HTTP server listening and the
 // runner never exits — a suite that hangs the moment it goes red is barely more useful
 // than one that never goes red at all, because you cannot tell the two apart.
-async function boot(t, crew = CREW) {
+async function boot(t, crew = CREW, configOverrides = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-routes-'));
   const tokenFile = path.join(dir, 'auth.json');
   fs.writeFileSync(tokenFile, JSON.stringify({ token: TOKEN }));
@@ -52,6 +52,7 @@ async function boot(t, crew = CREW) {
     tokenFile,
     nudge: { enabled: false }, delivery: {}, contextWatch: { enabled: false },
     notify: { type: 'none' }, remoteBridge: { enabled: false },
+    ...configOverrides,
   };
   const ctx = build({ config, agents: crew });
   const server = http.createServer(ctx.app);
@@ -90,8 +91,8 @@ function place(ctx, id, status) {
   ctx.store.db.prepare('UPDATE work_orders SET status = ? WHERE id = ?').run(status, id);
 }
 
-async function newOrder(call, { assignee, repo, title = 'a task' }) {
-  const r = await call('POST', '/api/orders', { title, assignee, repo, actor: 'human' });
+async function newOrder(call, { assignee, repo, project_id, title = 'a task' }) {
+  const r = await call('POST', '/api/orders', { title, assignee, repo, project_id, actor: 'human' });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   return r.body.id;
 }
@@ -100,12 +101,93 @@ async function newOrder(call, { assignee, repo, title = 'a task' }) {
 
 test('every route requires a token', async (t) => {
   const { call } = await boot(t);
-  for (const [method, route] of [['GET', '/api/orders'], ['POST', '/api/orders'], ['GET', '/api/agents/status'], ['GET', '/api/group/history']]) {
+  for (const [method, route] of [['GET', '/api/projects'], ['GET', '/api/orders'], ['POST', '/api/orders'], ['GET', '/api/agents/status'], ['GET', '/api/group/history']]) {
     const r = await call(method, route, method === 'POST' ? { title: 'x' } : undefined, { token: null });
     assert.equal(r.status, 401, `${method} ${route} should require a token`);
   }
   const bad = await call('GET', '/api/orders', undefined, { token: 'wrong-token-same-length!!' });
   assert.equal(bad.status, 401);
+});
+
+// ---------- projects and order ids ----------
+
+const PROJECTS = [
+  { id: 'app', name: 'Application', prefix: 'APP' },
+  { id: 'docs', name: 'Documentation', prefix: 'DOC' },
+];
+
+test('project projection is atomic when startup cannot upsert every configured project', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-project-sync-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dbPath = path.join(dir, 'test.db');
+  const seeded = open(dbPath);
+  seeded.db.exec(`CREATE TRIGGER reject_docs BEFORE INSERT ON projects
+    WHEN NEW.id = 'docs' BEGIN SELECT RAISE(ABORT, 'project sync failed'); END`);
+  seeded.close();
+
+  assert.throws(() => build({ config: { dbPath, projects: PROJECTS }, agents: CREW }), /project sync failed/);
+  const checked = open(dbPath);
+  assert.equal(checked.project.all.all().length, 0);
+  checked.close();
+});
+
+test('configured projects are listed, persisted, filtered, and numbered independently', async (t) => {
+  const { call, ctx } = await boot(t, CREW, { projects: PROJECTS });
+  assert.deepEqual((await call('GET', '/api/projects')).body, PROJECTS);
+  assert.deepEqual(
+    (({ id, name, prefix }) => ({ id, name, prefix }))(ctx.store.project.getById.get('app')),
+    PROJECTS[0],
+  );
+
+  const app1 = await newOrder(call, { project_id: 'app' });
+  const docs1 = await newOrder(call, { project_id: 'docs' });
+  const app2 = await newOrder(call, { project_id: 'app' });
+  assert.deepEqual([app1, docs1, app2], ['APP-001', 'DOC-001', 'APP-002']);
+
+  const appOrders = (await call('GET', '/api/orders?project_id=app')).body;
+  assert.deepEqual(appOrders.map((order) => order.id).sort(), ['APP-001', 'APP-002']);
+  assert.ok(appOrders.every((order) => order.project_id === 'app'));
+});
+
+test('order ids use the greatest existing suffix, not the number of rows', async (t) => {
+  const { call, ctx } = await boot(t, CREW, { projects: PROJECTS });
+  for (let i = 0; i < 3; i++) await newOrder(call, { project_id: 'app' });
+  ctx.store.db.prepare('DELETE FROM work_orders WHERE id = ?').run('APP-002');
+
+  assert.equal(await newOrder(call, { project_id: 'app' }), 'APP-004');
+});
+
+test('an order-id collision is retried through the production create route', async (t) => {
+  const { call, ctx } = await boot(t, CREW, { projects: PROJECTS });
+  assert.equal(await newOrder(call, { project_id: 'app' }), 'APP-001');
+
+  const realMax = ctx.store.order.maxSeqForPrefix;
+  let reads = 0;
+  ctx.store.order.maxSeqForPrefix = {
+    get(...args) {
+      reads += 1;
+      return reads === 1 ? { n: 0 } : realMax.get(...args);
+    },
+  };
+  assert.equal(await newOrder(call, { project_id: 'app' }), 'APP-002');
+  assert.equal(reads, 2);
+});
+
+test('configured projects are required and unknown projects leave no order behind', async (t) => {
+  const { call, ctx } = await boot(t, CREW, { projects: PROJECTS });
+  const missing = await call('POST', '/api/orders', { title: 'missing project' });
+  assert.equal(missing.status, 400);
+  assert.deepEqual(missing.body.available_projects, ['app', 'docs']);
+
+  const unknown = await call('POST', '/api/orders', { title: 'unknown project', project_id: 'ghost' });
+  assert.equal(unknown.status, 404);
+  assert.deepEqual(unknown.body.available_projects, ['app', 'docs']);
+  assert.equal(ctx.store.order.all.all().length, 0);
+});
+
+test('without projects, creating an order keeps the configured legacy prefix', async (t) => {
+  const { call } = await boot(t, CREW, { orderPrefix: 'JOB' });
+  assert.equal(await newOrder(call, {}), 'JOB-001');
 });
 
 // ---------- ownership, at the route ----------
@@ -707,7 +789,7 @@ test('review snapshots have no update surface or automatic thaw timer', () => {
   assert.doesNotMatch(freezeSource, /setTimeout|setInterval|TTL|expire/i);
 });
 
-test('opening an existing database adds review columns and the snapshot table', (t) => {
+test('opening an existing database adds project and review columns plus the snapshot table', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-migrate-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const dbPath = path.join(dir, 'old.db');
@@ -718,6 +800,7 @@ test('opening an existing database adds review columns and the snapshot table', 
     DROP TABLE order_revisions;
     ALTER TABLE work_orders DROP COLUMN frozen;
     ALTER TABLE work_orders DROP COLUMN audit_revision;
+    ALTER TABLE projects DROP COLUMN prefix;
   `);
   old.close();
 
@@ -726,6 +809,8 @@ test('opening an existing database adds review columns and the snapshot table', 
   const columns = upgraded.db.prepare('PRAGMA table_info(work_orders)').all().map((c) => c.name);
   assert.ok(columns.includes('audit_revision'));
   assert.ok(columns.includes('frozen'));
+  const projectColumns = upgraded.db.prepare('PRAGMA table_info(projects)').all().map((c) => c.name);
+  assert.ok(projectColumns.includes('prefix'));
   assert.ok(upgraded.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'order_revisions'").get());
 });
 
