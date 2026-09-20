@@ -6,11 +6,13 @@
 const { validateAdapter } = require('./contract');
 const { createTmuxAdapter } = require('./tmux');
 const { createCmuxAdapter } = require('./cmux');
+const { createPaseoAdapter } = require('./paseo');
 const { createFakeAdapter } = require('./fake');
 
 const BUILTIN = {
   tmux: createTmuxAdapter,
   cmux: createCmuxAdapter,
+  paseo: createPaseoAdapter,
   fake: createFakeAdapter,
 };
 

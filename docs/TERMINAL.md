@@ -255,6 +255,31 @@ by environment. A sidecar started outside cmux connects to the bus, receives eve
 then fails to type a single character — while still consuming the messages. It must be
 started from inside cmux.
 
+**[Paseo](https://github.com/getpaseo/paseo)** uses a terminal's fixed `name` as its
+identity. Create the terminal with the same name as `target`, then start your coding CLI
+inside it:
+
+```bash
+paseo terminal create --name scout
+```
+
+```jsonc
+{ "id": "scout", "transport": "terminal",
+  "terminal": { "adapter": "paseo", "target": "scout", "busyPattern": "esc to interrupt" } }
+```
+
+Paseo chooses the name when it creates the terminal and cannot rename or clear it later.
+That is intentional here: the terminal title is not identity because shells and coding CLIs
+rewrite titles during normal use. If the name is wrong, close that terminal and create one
+with the right name. If several terminals have the same name, mousecrew refuses the
+ambiguity rather than choosing one. For hooks or `identity`, pass the full terminal ID as
+`--window`; `identity` verifies that the existing name already matches `target`.
+
+The adapter depends only on Paseo's public command line (`terminal ls`, `capture`, and
+`send-keys`), not its internal WebSocket protocol. It was tested with Paseo 0.7.2 and only
+targets the local daemon; it neither creates replacement terminals nor connects with
+`--host`.
+
 ## Known limitations
 
 - **Forced delivery can interrupt active work.** It happens at most once per queued message
