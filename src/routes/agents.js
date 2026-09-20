@@ -83,6 +83,19 @@ function createAgentsRouter({ manager, identity, store, requireToken, config }) 
     res.json({ ok: true, ...rt.newSession() });
   });
 
+  /** Gracefully rotate after the current turn; completion is reported by status. */
+  router.post('/api/agents/:id/session/rotate', (req, res) => {
+    const cfg = manager.get(req.params.id);
+    if (!cfg) return res.status(404).json({ error: 'unknown agent' });
+    if (cfg.transport !== 'local' || cfg.runner === 'exec') {
+      return res.status(501).json({
+        error: `session rotation is not supported for ${cfg.transport === 'local' ? 'exec' : cfg.transport} agents`,
+        code: 'session_rotation_unsupported',
+      });
+    }
+    res.json(manager.runtime(req.params.id).rotate());
+  });
+
   // ---------- direct messages ----------
 
   router.get('/api/dm/events', (req, res) => {

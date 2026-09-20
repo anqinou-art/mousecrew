@@ -24,18 +24,25 @@ function fakeProcess() {
   return proc;
 }
 
-function makeRuntime(over = {}) {
+function makeRuntime(over = {}, deps = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-rt-'));
   const procs = [];
+  const spawns = [];
   const cfg = normalizeAgent({
     id: 'tester', transport: 'local', runner: 'claude', workDir: dir,
     idleTimeoutMs: 60_000, turnIdleMs: 60_000, turnHardMs: 120_000, ...over,
   });
   const rt = new AgentRuntime(cfg, {
     dataDir: dir,
-    spawn: () => { const p = fakeProcess(); procs.push(p); return p; },
+    spawn: (command, args) => {
+      const p = fakeProcess();
+      procs.push(p);
+      spawns.push({ command, args });
+      return p;
+    },
+    ...deps,
   });
-  return { rt, procs, dir };
+  return { rt, procs, spawns, dir };
 }
 
 test('a registered agent is not a running process until someone talks to it', () => {
@@ -164,6 +171,145 @@ test('rotating to a new session drops the resume', async () => {
   assert.equal(rt.sessionId, null);
   assert.equal(rt.contextTokens, 0);
   assert.ok(!rt.buildSpawnArgs().args.includes('--resume'));
+  rt.destroy();
+});
+
+test('graceful rotation waits for the current answer, deduplicates requests, and drains queued work into the new process', async () => {
+  const handoffRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-handoff-'));
+  const handoffDir = path.join(handoffRoot, 'tester-handoff');
+  fs.mkdirSync(handoffDir);
+  fs.writeFileSync(path.join(handoffDir, '2026-09-20.md'), 'continue here');
+  const { rt, procs, dir } = makeRuntime({}, {
+    contextWatch: { handoffDir: handoffRoot, noHandoff: [], handoffMaxAgeDays: 7 },
+  });
+  const first = rt.send('current work');
+  await new Promise((r) => setImmediate(r));
+  procs[0].say({ type: 'system', subtype: 'init', session_id: 'old-session' });
+
+  assert.deepEqual(rt.rotate(), { queued: true });
+  assert.deepEqual(rt.rotate(), { queued: true });
+  assert.equal(rt.status().rotateQueued, true);
+  const later = rt.send('queued work');
+  const after = rt.send('follow-up work');
+  assert.equal(procs.length, 1);
+
+  procs[0].say({ type: 'result', result: 'finished', session_id: 'old-session' });
+  assert.equal((await first).text, 'finished');
+  assert.equal(rt.status().rotateQueued, false);
+  assert.equal(procs[0].written.length, 1, 'queued work must not reach the replaced process');
+
+  rt.start();
+  assert.equal(procs.length, 2, 'duplicate requests cause only one replacement');
+  const written = procs[1].written.map((line) => JSON.parse(line).message.content);
+  assert.match(written[0], /2026-09-20\.md/);
+  assert.match(written[0], /queued work/);
+  assert.equal(written.length, 1, 'the signpost and task share one managed turn');
+
+  procs[1].say({ type: 'system', subtype: 'init', session_id: 'new-session' });
+  assert.deepEqual(
+    { ...rt.status().lastRotate, at: 'ignored' },
+    { at: 'ignored', ok: true, from: 'old-session', to: 'new-session' },
+  );
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(dir, 'session_tester.json'), 'utf8')).sessionId,
+    'new-session',
+  );
+  procs[1].say({ type: 'result', result: 'new answer', session_id: 'new-session' });
+  assert.equal((await later).text, 'new answer');
+  assert.equal(JSON.parse(procs[1].written[1]).message.content, 'follow-up work');
+  procs[1].say({ type: 'result', result: 'follow-up answer', session_id: 'new-session' });
+  assert.equal((await after).text, 'follow-up answer');
+  rt.destroy();
+});
+
+test('rotation without handoffs sends the first task unchanged as one managed turn', async () => {
+  const { rt, procs } = makeRuntime({}, {
+    contextWatch: { noHandoff: ['tester'] },
+  });
+  rt.sessionId = 'old-session';
+  rt.rotate();
+
+  const task = rt.send('REAL TASK');
+  assert.equal(procs[0].written.length, 1);
+  assert.equal(JSON.parse(procs[0].written[0]).message.content, 'REAL TASK');
+
+  procs[0].say({ type: 'system', subtype: 'init', session_id: 'new-session' });
+  procs[0].say({ type: 'result', result: 'TASK ANSWER', session_id: 'new-session' });
+  assert.equal((await task).text, 'TASK ANSWER');
+  rt.destroy();
+});
+
+async function assertStaleTailIgnored(sameChunk) {
+  const { rt, procs, spawns, dir } = makeRuntime({}, {
+    contextWatch: { noHandoff: ['tester'] },
+  });
+  const first = rt.send('current work');
+  await new Promise((r) => setImmediate(r));
+  procs[0].say({ type: 'system', subtype: 'init', session_id: 'old-session' });
+  assert.deepEqual(rt.rotate(), { queued: true });
+  const later = rt.send('queued work');
+
+  const result = JSON.stringify({ type: 'result', result: 'finished', session_id: 'old-session' }) + '\n';
+  const staleInit = JSON.stringify({ type: 'system', subtype: 'init', session_id: 'old-session' }) + '\n';
+  if (sameChunk) procs[0].stdout.write(result + staleInit);
+  else {
+    procs[0].stdout.write(result);
+    procs[0].stdout.write(staleInit);
+  }
+
+  assert.equal((await first).text, 'finished');
+  assert.equal(rt.sessionId, null);
+  assert.equal(rt.lastRotate, null);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'session_tester.json'), 'utf8')).sessionId, null);
+
+  rt.start();
+  assert.equal(spawns.length, 2);
+  assert.equal(spawns[1].args.includes('--resume'), false);
+  assert.equal(spawns[1].args.includes('old-session'), false);
+  procs[1].say({ type: 'system', subtype: 'init', session_id: 'new-session' });
+  assert.equal(rt.lastRotate.ok, true);
+  procs[1].say({ type: 'result', result: 'new answer', session_id: 'new-session' });
+  assert.equal((await later).text, 'new answer');
+  rt.destroy();
+}
+
+test('old output cannot cross the generation boundary within one stdout chunk', async () => {
+  await assertStaleTailIgnored(true);
+});
+
+test('old output in a later stdout chunk remains fenced out', async () => {
+  await assertStaleTailIgnored(false);
+});
+
+test('rotation fails for the same session id and stale output cannot settle a replacement', async () => {
+  const { rt, procs } = makeRuntime();
+  const first = rt.send('work');
+  await new Promise((r) => setImmediate(r));
+  procs[0].say({ type: 'system', subtype: 'init', session_id: 'same-session' });
+  procs[0].say({ type: 'result', result: 'done', session_id: 'same-session' });
+  await first;
+
+  assert.deepEqual(rt.rotate(), { queued: false, rotating: true });
+  assert.equal(procs[0].killed, true, 'an idle runtime starts rotation immediately');
+
+  rt.start();
+  procs[0].say({ type: 'system', subtype: 'init', session_id: 'stale-session' });
+  assert.equal(rt.lastRotate, null, 'discarded process output must not settle verification');
+  procs[1].say({ type: 'system', subtype: 'init', session_id: 'same-session' });
+  assert.equal(rt.lastRotate.ok, false);
+  assert.equal(rt.lastRotate.from, 'same-session');
+  assert.equal(rt.lastRotate.to, 'same-session');
+  rt.destroy();
+});
+
+test('rotation verification times out without claiming success', async () => {
+  const { rt } = makeRuntime({}, { rotateVerifyMs: 10 });
+  rt.sessionId = 'old-session';
+  assert.deepEqual(rt.rotate(), { queued: false, rotating: true });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(rt.lastRotate.ok, false);
+  assert.equal(rt.lastRotate.from, 'old-session');
+  assert.equal(rt.lastRotate.to, null);
   rt.destroy();
 });
 

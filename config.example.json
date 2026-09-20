@@ -54,8 +54,10 @@
   "contextWatch": {
     "enabled": true,
     "thresholdTurns": 10,
+    "thresholdTokens": null,
     "noHandoff": ["clerk"],
-    "handoffDir": "./data/handoff"
+    "handoffDir": "./data/handoff",
+    "handoffMaxAgeDays": 7
   },
 
   "// notify": "How to reach the human. 'none' | 'webhook' (POST {title, body}).",

@@ -39,7 +39,10 @@ function build({ config, agents }) {
   const workspace = new WorkspaceRules(agents);
   const notifier = createNotifier(config.notify);
   const hub = new GroupHub({ store, archive, identity, channel: config.groupChannel || 'group' });
-  const manager = new AgentManager(agents, { dataDir: require('path').dirname(config.dbPath) });
+  const manager = new AgentManager(agents, {
+    dataDir: require('path').dirname(config.dbPath),
+    contextWatch: config.contextWatch,
+  });
   const dispatcher = createDispatcher({ manager, identity, hub, workspace, config });
   const nudger = createNudger({ store, identity, notifier, config, workspace });
 

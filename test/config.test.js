@@ -157,6 +157,27 @@ test('a configured wake directory is resolved from the config root', (t) => {
     path.join(dir, 'state', 'wake'));
 });
 
+test('context-watch token and handoff-age thresholds are optional validated config', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-context-config-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const agentsFile = path.join(dir, 'agents.json');
+  fs.writeFileSync(agentsFile, JSON.stringify({
+    agents: [{ id: 'worker', transport: 'local', workDir: '/tmp/worker' }],
+  }));
+  const write = (name, contextWatch) => {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, JSON.stringify({ contextWatch }));
+    return file;
+  };
+
+  const defaults = load({ configFile: write('defaults.json', {}), agentsFile, root: dir }).config.contextWatch;
+  assert.equal(defaults.thresholdTokens, null);
+  assert.equal(defaults.handoffMaxAgeDays, 7);
+  assert.equal(load({ configFile: write('set.json', { thresholdTokens: 120000, handoffMaxAgeDays: 3 }), agentsFile, root: dir }).config.contextWatch.thresholdTokens, 120000);
+  assert.throws(() => load({ configFile: write('bad-token.json', { thresholdTokens: 0 }), agentsFile, root: dir }), /thresholdTokens/);
+  assert.throws(() => load({ configFile: write('bad-age.json', { handoffMaxAgeDays: -1 }), agentsFile, root: dir }), /handoffMaxAgeDays/);
+});
+
 test('draft hold timing only constrains rosters that enable input-box detection', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-draft-config-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

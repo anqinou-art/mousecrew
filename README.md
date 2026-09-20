@@ -120,6 +120,27 @@ not deployment: mousecrew still does not pull, deploy, or restart anything.
 
 `bin/mousecrew.js` with no arguments prints every command.
 
+### Session rotation and context watch
+
+For a session-aware local agent, `mousecrew rotate <agent>` waits for the current turn to
+finish, starts a fresh session before queued messages drain, and verifies that the new
+process reports a different session id. The command only says whether rotation started or
+was queued; check `mousecrew status` for `lastRotate` and its verified result. The older
+`POST /api/agents/:id/session/new` endpoint remains the force option: it interrupts a
+running turn immediately.
+
+The first message sent to a rotated session is preceded by a pointer to the newest file in
+`contextWatch.handoffDir/<agent>-handoff/`. Newest means the date and optional numeric
+suffix in `YYYY-MM-DD[-N].md`, not file modification time. Missing, future-dated, and older
+than `contextWatch.handoffMaxAgeDays` (default 7) handoffs are called out explicitly;
+agents in `contextWatch.noHandoff` receive no pointer.
+
+Context watch still estimates turns remaining because percentage alone hides how quickly a
+window is growing. You may also set `contextWatch.thresholdTokens` to an absolute token
+count; either threshold triggers the warning. It is unset by default, preserving the
+turns-only rule. An absolute limit is useful for very large windows where quality and cost
+can degrade well before the turns estimate becomes urgent.
+
 ### Try it without any AI at all
 
 Point an agent at `/bin/cat` and it becomes an echo bot — enough to watch a message travel
@@ -302,7 +323,8 @@ All endpoints require `Authorization: Bearer <token>`. There is no grace mode.
 | `POST /api/threads/:name/finish` | the only road to `done`; requires a snapshot |
 | `POST /api/threads/:name/archive` | soft delete; needs a reason if there is no snapshot |
 | `GET /api/agents/status` | every crew member |
-| `POST /api/agents/:id/session/new` | rotate to a fresh context window |
+| `POST /api/agents/:id/session/rotate` | gracefully rotate a local agent after its current turn; inspect status for the verified result |
+| `POST /api/agents/:id/session/new` | force an immediate new session, interrupting a running turn |
 | `POST /api/agents/presence` | terminal agents report themselves |
 | `POST /api/agent/:id/chat` | direct message to one agent |
 | `GET /api/dm/events`, `/api/dm/pending`, `POST /api/dm/:id/post`, `/ack` | the DM lane |
