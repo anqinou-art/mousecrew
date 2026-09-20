@@ -422,6 +422,56 @@ fs.renameSync = (from, to) => {
   assert.equal(record.activity.sessionId, 'session-b');
 });
 
+test('a session writer recovers after the previous lock owner exits', async (t) => {
+  const root = localCrewRoot(t);
+  const env = { MOUSECREW_ROOT: root, MOUSECREW_WINDOW: '%1' };
+  const dir = path.join(root, 'data', 'sessions');
+  const file = rotation.sessionRecordPath(dir, 'scout');
+  const lock = `${file}.lock`;
+  const oldStart = await runCli(['session-record', '--as', 'scout'], 'http://unused', {
+    env,
+    input: JSON.stringify({ session_id: 'session-a', transcript_path: '/tmp/a.jsonl' }),
+  });
+  assert.equal(oldStart.code, 0, oldStart.stderr);
+
+  const shim = path.join(root, 'exit-before-activity-commit.cjs');
+  fs.writeFileSync(shim, `
+const fs = require('fs');
+const rename = fs.renameSync;
+fs.renameSync = function(from, to) {
+  const pending = JSON.parse(fs.readFileSync(from, 'utf8'));
+  if (pending.activity) process.exit(73);
+  return rename.apply(fs, arguments);
+};
+`);
+  const interrupted = await runCli([
+    'session-activity', '--as', 'scout', 'idle',
+  ], 'http://unused', {
+    env: { ...env, NODE_OPTIONS: `--require=${shim}` },
+    input: JSON.stringify({ session_id: 'session-a' }),
+  });
+  assert.equal(interrupted.code, 73);
+  assert.equal(fs.existsSync(lock), true);
+
+  const newStart = await runCli(['session-record', '--as', 'scout'], 'http://unused', {
+    env,
+    input: JSON.stringify({ session_id: 'session-b', transcript_path: '/tmp/b.jsonl' }),
+  });
+  assert.equal(newStart.code, 0, newStart.stderr);
+  const newBusy = await runCli(['session-activity', '--as', 'scout', 'busy'], 'http://unused', {
+    env, input: JSON.stringify({ session_id: 'session-b' }),
+  });
+  assert.equal(newBusy.code, 0, newBusy.stderr);
+
+  const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(record.sessionId, 'session-b');
+  assert.equal(record.transcriptPath, '/tmp/b.jsonl');
+  assert.equal(record.activity.state, 'busy');
+  assert.equal(record.activity.sessionId, 'session-b');
+  assert.equal(fs.existsSync(lock), false);
+  assert.equal(fs.existsSync(`${lock}.reclaim`), false);
+});
+
 test('session-record keeps an encoded-looking id separate from the id that encodes to it', async (t) => {
   const ids = ['../scout', 'id-Li4vc2NvdXQ'];
   const root = localCrewRoot(t, ids.map((id, index) => ({

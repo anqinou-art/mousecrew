@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { randomUUID } = require('crypto');
 const { execFileSync } = require('child_process');
 
 const TAIL_BYTES = 128 * 1024;
@@ -36,28 +37,96 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+function readLockOwner(lock, { lockReadFile = fs.readFileSync } = {}) {
+  try {
+    const owner = JSON.parse(lockReadFile(lock, 'utf8'));
+    if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0
+        || typeof owner.token !== 'string' || !owner.token) return null;
+    return owner;
+  } catch {
+    return null;
+  }
+}
+
+function isLockOwnerAlive(owner, { processKill = process.kill } = {}) {
+  if (!owner) return false;
+  try {
+    processKill(owner.pid, 0);
+    return true;
+  } catch (error) {
+    return !error || error.code !== 'ESRCH';
+  }
+}
+
+function createOwnedLock(lock, {
+  lockWriteFile = fs.writeFileSync, lockLink = fs.linkSync, lockUnlink = fs.unlinkSync,
+  newLockToken = randomUUID,
+} = {}) {
+  const owner = { pid: process.pid, token: newLockToken() };
+  const prepared = `${lock}.owner-${owner.pid}-${owner.token}.tmp`;
+  lockWriteFile(prepared, JSON.stringify(owner), { flag: 'wx', mode: 0o600 });
+  try {
+    lockLink(prepared, lock);
+  } finally {
+    try { lockUnlink(prepared); } catch {}
+  }
+  return owner;
+}
+
+function releaseOwnedLock(lock, owner, deps) {
+  const { lockUnlink = fs.unlinkSync } = deps;
+  const current = readLockOwner(lock, deps);
+  if (!current || current.pid !== owner.pid || current.token !== owner.token) {
+    throw new Error(`session record lock ownership lost: ${lock}`);
+  }
+  lockUnlink(lock);
+}
+
+function acquireOwnedLock(lock, deadline, deps) {
+  const { now = Date.now, wait = sleepSync, lockUnlink = fs.unlinkSync } = deps;
+  while (true) {
+    try {
+      return createOwnedLock(lock, deps);
+    } catch (error) {
+      if (!error || error.code !== 'EEXIST') throw error;
+    }
+
+    const owner = readLockOwner(lock, deps);
+    if (!isLockOwnerAlive(owner, deps)) {
+      const reclaim = `${lock}.reclaim`;
+      const reclaimOwner = acquireOwnedLock(reclaim, deadline, deps);
+      try {
+        const current = readLockOwner(lock, deps);
+        if (!isLockOwnerAlive(current, deps)) {
+          try { lockUnlink(lock); } catch (error) {
+            if (!error || error.code !== 'ENOENT') throw error;
+          }
+        }
+      } finally {
+        releaseOwnedLock(reclaim, reclaimOwner, deps);
+      }
+      continue;
+    }
+
+    if (now() >= deadline) throw new Error(`session record lock timed out: ${lock}`);
+    wait(LOCK_RETRY_MS);
+  }
+}
+
 function withSessionRecordLock(dir, agent, action, {
-  mkdir = fs.mkdirSync, chmod = fs.chmodSync, rmdir = fs.rmdirSync,
-  now = Date.now, wait = sleepSync,
+  mkdir = fs.mkdirSync, chmod = fs.chmodSync, now = Date.now, wait = sleepSync,
+  ...lockDeps
 } = {}) {
   mkdir(dir, { recursive: true, mode: 0o700 });
   chmod(dir, 0o700);
   const lock = `${sessionRecordPath(dir, agent)}.lock`;
   const deadline = now() + LOCK_WAIT_MS;
-  while (true) {
-    try {
-      mkdir(lock, { mode: 0o700 });
-      break;
-    } catch (error) {
-      if (!error || error.code !== 'EEXIST') throw error;
-      if (now() >= deadline) throw new Error(`session record lock timed out: ${lock}`);
-      wait(LOCK_RETRY_MS);
-    }
-  }
+  const deps = { now, wait, ...lockDeps };
+  const owner = acquireOwnedLock(lock, deadline, deps);
   try {
     return action();
   } finally {
-    rmdir(lock);
+    releaseOwnedLock(lock, owner, deps);
   }
 }
 
