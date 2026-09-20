@@ -17,7 +17,10 @@ const core = require('../src/lib/sidecar-core');
 // and it exists for the one question these cannot answer: whether characters arrive.
 
 const CREW = [
-  { id: 'architect', displayName: 'lead', transport: 'terminal', terminal: { adapter: 'fake', target: 'lead' } },
+  {
+    id: 'architect', displayName: 'lead', transport: 'terminal',
+    terminal: { adapter: 'fake', target: 'lead', inputBox: 'claude-code' },
+  },
   { id: 'builder', displayName: 'builder', transport: 'terminal', terminal: { adapter: 'fake', target: 'builder' } },
   { id: 'server-side', displayName: 'server-side', transport: 'local', workDir: '/tmp' },
 ].map(normalizeAgent);
@@ -54,6 +57,8 @@ function harness({ windows, now, options } = {}) {
 }
 
 const msg = (sender, content, ts = '2026-08-20T12:00:00Z') => ({ content, ts, metadata: { sender } });
+const INPUT_RULE = '─'.repeat(80);
+const inputScreen = (text, prefix = '') => `${prefix}${INPUT_RULE}\n❯ ${text}\n${INPUT_RULE}\nstatus`;
 
 /** Get past the baseline pass, which deliberately delivers nothing. */
 function primed(h) {
@@ -166,6 +171,73 @@ test('a failed injection keeps the message queued', async () => {
   await h.sc.deliver();
   assert.equal(h.of('inject-failed').length, 1);
   assert.equal(h.sc.state.pending.length, 1, 'dropping it here would lose a message nobody could trace');
+});
+
+test('changing input text holds delivery and persists the marker with one screen read', async () => {
+  const h = primed(harness({
+    windows: [{ ref: '%1', identity: 'lead', screen: inputScreen('half a sentence') }],
+  }));
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'human', content: 'wait for me' });
+  let reads = 0;
+  const readScreen = h.adapter.readScreen.bind(h.adapter);
+  h.adapter.readScreen = async (...args) => { reads += 1; return readScreen(...args); };
+
+  await h.sc.deliver();
+
+  assert.equal(h.adapter.__test.sentTo('%1').length, 0);
+  assert.equal(h.sc.state.pending.length, 1);
+  assert.ok(h.sc.state.pending[0].draftHeldAt);
+  assert.ok(JSON.parse(fs.readFileSync(h.sc.statePath, 'utf8')).pending[0].draftHeldAt);
+  assert.equal(h.of('draft-hold')[0].reason, 'changed');
+  assert.equal(reads, 1, 'busy and input-box decisions share one screen read');
+});
+
+test('unchanged input text releases delivery after the quiet period', async () => {
+  const h = primed(harness({
+    windows: [{ ref: '%1', identity: 'lead', screen: inputScreen('unfinished note') }],
+    options: { draftQuietMs: 1000 },
+  }));
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'human', content: 'deliver later' });
+  await h.sc.deliver();
+  h.advance(1000);
+
+  await h.sc.deliver();
+
+  assert.equal(h.adapter.__test.sentTo('%1').length, 1);
+  assert.equal(h.sc.state.pending.length, 0);
+});
+
+test('unknown, empty, and unconfigured input boxes preserve the original delivery bytes', async () => {
+  const cases = [
+    { agent: 'architect', ref: '%1', identity: 'lead', screen: 'unrecognised screen' },
+    { agent: 'architect', ref: '%1', identity: 'lead', screen: inputScreen('') },
+    { agent: 'builder', ref: '%2', identity: 'builder', screen: inputScreen('typing but disabled') },
+  ];
+  for (const [index, sample] of cases.entries()) {
+    const h = primed(harness({ windows: [{ ref: sample.ref, identity: sample.identity, screen: sample.screen }] }));
+    const item = { agent: sample.agent, kind: 'group', sender: 'human', content: `unchanged ${index}` };
+    h.sc.queue(item);
+
+    await h.sc.deliver();
+
+    assert.equal(h.adapter.__test.sentTo(sample.ref)[0], core.envelope(item));
+  }
+});
+
+test('the input-box gate does nothing while the activity gate is blocking', async () => {
+  const h = primed(harness({
+    windows: [{
+      ref: '%1', identity: 'lead',
+      screen: inputScreen('actively typing', 'working (esc to interrupt)\n'),
+    }],
+  }));
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'human', content: 'still waiting' });
+
+  await h.sc.deliver();
+
+  assert.equal(h.of('busy-wait').length, 1);
+  assert.equal(h.of('draft-hold').length, 0);
+  assert.equal(h.sc.state.pending[0].draftHeldAt, undefined);
 });
 
 test('five consecutive group messages are injected and persisted as one batch', async () => {
@@ -339,6 +411,51 @@ test('a message held by a busy window for ten minutes is forced once and deliver
   assert.equal(h.adapter.__test.sentTo('%1').length, 1);
   assert.equal(h.of('forced').length, 1);
   assert.equal(h.of('forced-injected')[0].count, 1);
+  assert.equal(h.sc.state.pending.length, 0);
+});
+
+test('a draft-held message earns one forced attempt and waits only the forced draft limit', async () => {
+  const h = primed(harness({
+    windows: [{ ref: '%1', identity: 'lead', screen: inputScreen('still typing') }],
+    options: { draftQuietMs: 60 * 60 * 1000, forcedDraftHoldMs: 90000 },
+  }));
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'human', content: 'do not lose me' });
+  await h.sc.deliver();
+  h.advance(11 * 60 * 1000);
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'human', content: 'fresh behind it' });
+
+  await h.sc.deliver();
+
+  assert.equal(h.of('forced').length, 1);
+  assert.equal(h.adapter.__test.sentTo('%1').length, 0);
+  assert.ok(h.sc.state.pending[0].forcedAt);
+  assert.equal(h.sc.state.pending[0].forcedTriedAt, undefined, 'waiting at the draft gate does not spend the attempt');
+
+  h.advance(90001);
+  await h.sc.deliver();
+
+  assert.equal(h.adapter.__test.sentTo('%1').length, 1);
+  assert.equal(h.of('forced-injected').length, 1);
+  assert.doesNotMatch(h.adapter.__test.sentTo('%1')[0], /fresh behind it/);
+  assert.equal(h.sc.state.pending.length, 1);
+  assert.equal(h.sc.state.pending[0].content, 'fresh behind it');
+  assert.ok(h.sc.state.pending[0].draftHeldAt, 'forcing the old batch does not clear a fresh item\'s hold evidence');
+});
+
+test('a draft-held message keeps its forced eligibility when the gate releases at expiry', async () => {
+  const h = primed(harness({
+    windows: [{ ref: '%1', identity: 'lead', screen: inputScreen('unfinished') }],
+    options: { draftQuietMs: 1000 },
+  }));
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'human', content: 'deliver after quiet' });
+  await h.sc.deliver();
+  h.advance(11 * 60 * 1000);
+
+  await h.sc.deliver();
+
+  assert.equal(h.of('forced').length, 1, 'expiry sees the persisted hold before release clears it');
+  assert.equal(h.of('expired').length, 0);
+  assert.equal(h.of('forced-injected').length, 1);
   assert.equal(h.sc.state.pending.length, 0);
 });
 

@@ -87,6 +87,8 @@ const sidecar = new Sidecar({
   inlineLimit: config.delivery.inlineLimit,
   forceOnExpiry: config.delivery.forceOnExpiry,
   forcedGraceMs: config.delivery.forcedGraceMs,
+  draftQuietMs: config.delivery.draftQuietMs,
+  forcedDraftHoldMs: config.delivery.forcedDraftHoldMs,
 });
 
 // Log every structured event. These are the same events the tests assert against, so what

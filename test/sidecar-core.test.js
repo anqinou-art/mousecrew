@@ -164,12 +164,22 @@ test('forced delivery planning has four outcomes and merged direct messages reta
     { agent: 'architect', kind: 'dm', sender: 'two', content: 'second', dmId: 'd2', queuedAt: 'T2' },
     { agent: 'architect', kind: 'group', sender: 'three', content: 'third', queuedAt: 'T3' },
   ];
-  const marked = core.markForcedDeliveries(items, 1_000_000);
+  const marked = core.markForcedDeliveries(items, 1_000_000, true);
   assert.equal(marked.forced.length, 2, 'one direct carrier and one group item');
   assert.deepEqual(marked.absorbed, [items[1]]);
   assert.deepEqual(items[0].mergedFrom.map((source) => source.dmId), ['d1', 'd2']);
   assert.match(items[0].content, /first[\s\S]*second/);
   assert.equal(items[2].content, 'third', 'group batching remains owned by the group path');
+});
+
+test('an idle expired item only earns forced delivery after a persisted draft hold', () => {
+  const plain = { agent: 'architect', kind: 'group' };
+  const held = { agent: 'architect', kind: 'group', draftHeldAt: 'earlier' };
+  const marked = core.markForcedDeliveries([plain, held], 1_000_000, false);
+
+  assert.deepEqual(marked.forced, [held]);
+  assert.equal(plain.forcedAt, undefined);
+  assert.ok(held.forcedAt);
 });
 
 // ---------- window resolution ----------

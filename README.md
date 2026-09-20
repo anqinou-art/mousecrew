@@ -172,15 +172,23 @@ is decided, why messages expire, and what an adapter is and is not responsible f
 | Lifecycle managed by | mousecrew | you |
 
 When a terminal window becomes idle, consecutive group messages for that crew member are
-combined into one injection and one response cycle. A direct message always remains a
-separate delivery so its receipt stays unambiguous. Set `delivery.batchGroup` to `false` to
-return to one message per pass.
+combined into one injection and one response cycle. A direct message normally remains a
+separate delivery so its receipt stays unambiguous. The exception is expiry: direct messages
+for the same agent that expire together share one forced injection, while each keeps its own
+receipt. Set `delivery.batchGroup` to `false` to return group traffic to one message per pass.
 
 By default, a message held back by a busy window for ten minutes gets one forced delivery
 attempt. This intentionally interrupts the agent once rather than let a continuously busy
 window miss every message. A failed forced attempt is not retried; it expires after the
 two-minute `delivery.forcedGraceMs` window. Set `delivery.forceOnExpiry` to `false` for the
 previous expire-without-interrupting behaviour.
+
+For a terminal agent using Claude Code, set `terminal.inputBox` to `"claude-code"`. The
+sidecar then delays an otherwise-ready delivery while input text is still changing, and
+releases it after `delivery.draftQuietMs` (two minutes by default) without changes. Forced
+delivery waits at this gate for at most `delivery.forcedDraftHoldMs` (90 seconds by default).
+An unrecognised screen layout fails open, so a different CLI or TUI update behaves exactly
+as if input-box detection were disabled.
 
 Message body text longer than `delivery.inlineLimit` (600 characters by default) is written
 to a private `0600` file beside the sidecar state. The terminal receives the first part, the
@@ -398,11 +406,11 @@ Stated plainly, because you will meet them.
 
 - **One sidecar drives one multiplexer.** A roster mixing adapters needs a second sidecar;
   the process refuses to start rather than silently ignoring half the crew.
-- **A terminal agent that is always busy misses messages.** Injection only happens when the
-  window is idle, and a window doing continuous work is never idle; those messages expire
-  after ten minutes. Group history still has them, and undelivered DMs come back with a
-  receipt — but "your message was dropped because you were working" is not solved. Headless
-  agents queue instead and are unaffected.
+- **A terminal agent can still miss a message after its one forced attempt.** A message held
+  by a busy window gets one forced delivery after ten minutes, then expires if that attempt
+  fails. Messages with no matching window expire without an attempt. Group history still has
+  them, and undelivered DMs come back with a receipt. Headless agents queue instead and are
+  unaffected.
 - **Transitions record the actor but do not authenticate them.** Anyone with the token can
   act as anyone. Repo ownership and the merge gate *are* enforced — but on a *claimed*
   identity, so the gate stops an honest mistake, not a caller who names someone else.

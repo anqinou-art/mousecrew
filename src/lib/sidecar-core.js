@@ -190,8 +190,9 @@ function mergeDmBodies(items) {
   return `[${batch.length} direct messages delivered together after waiting]\n${batchBody(batch)}`;
 }
 
-function markForcedDeliveries(items, now = Date.now()) {
-  const candidates = (Array.isArray(items) ? items : []).filter((item) => item && !item.forcedAt);
+function markForcedDeliveries(items, now = Date.now(), busy = false) {
+  const candidates = (Array.isArray(items) ? items : [])
+    .filter((item) => item && !item.forcedAt && (busy || item.draftHeldAt));
   const forcedAt = new Date(now).toISOString();
   const forced = [];
   const absorbed = [];

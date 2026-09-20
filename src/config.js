@@ -19,6 +19,9 @@ const {
   DEFAULT_BATCH_GROUP, DEFAULT_INLINE_LIMIT,
   DEFAULT_FORCE_ON_EXPIRY, DEFAULT_FORCED_GRACE_MS,
 } = require('./lib/sidecar-core');
+const {
+  DEFAULT_DRAFT_QUIET_MS, DEFAULT_FORCED_DRAFT_HOLD_MS,
+} = require('./lib/input-draft');
 
 function expandTilde(p) {
   if (typeof p !== 'string') return p;
@@ -72,6 +75,8 @@ const DEFAULTS = {
     inlineLimit: DEFAULT_INLINE_LIMIT,
     forceOnExpiry: DEFAULT_FORCE_ON_EXPIRY,
     forcedGraceMs: DEFAULT_FORCED_GRACE_MS,
+    draftQuietMs: DEFAULT_DRAFT_QUIET_MS,
+    forcedDraftHoldMs: DEFAULT_FORCED_DRAFT_HOLD_MS,
   },
   contextWatch: { enabled: true, thresholdTurns: 10, noHandoff: [], handoffDir: './data/handoff' },
   notify: { type: 'none', url: '' },
@@ -160,6 +165,10 @@ function validateAgents(agents) {
     }
     if (transport === 'terminal' && !(a.terminal && a.terminal.adapter)) {
       errors.push(`${where}: terminal agents need terminal.adapter (e.g. "tmux")`);
+    }
+    if (transport === 'terminal' && a.terminal && a.terminal.inputBox !== undefined
+        && a.terminal.inputBox !== 'claude-code') {
+      errors.push(`${where}: terminal.inputBox must be "claude-code" when configured`);
     }
     if (a.repos !== undefined && !Array.isArray(a.repos)) {
       errors.push(`${where}: repos must be an array`);
@@ -252,7 +261,12 @@ function load({ configFile, agentsFile, root } = {}) {
   if (!Number.isInteger(cfg.delivery.forcedGraceMs) || cfg.delivery.forcedGraceMs < 1) {
     throw new Error('delivery.forcedGraceMs must be a positive integer');
   }
-
+  if (!Number.isInteger(cfg.delivery.draftQuietMs) || cfg.delivery.draftQuietMs < 1) {
+    throw new Error('delivery.draftQuietMs must be a positive integer');
+  }
+  if (!Number.isInteger(cfg.delivery.forcedDraftHoldMs) || cfg.delivery.forcedDraftHoldMs < 0) {
+    throw new Error('delivery.forcedDraftHoldMs must be a non-negative integer');
+  }
   const projectConfig = validateProjects(cfg.projects);
   if (projectConfig.errors.length) {
     throw new Error('project config is invalid:\n  - ' + projectConfig.errors.join('\n  - '));
@@ -268,7 +282,15 @@ function load({ configFile, agentsFile, root } = {}) {
     throw new Error('agent roster is invalid:\n  - ' + errors.join('\n  - '));
   }
 
-  return { config: cfg, agents: roster.map(normalizeAgent) };
+  const agents = roster.map(normalizeAgent);
+  const inputBoxEnabled = agents.some((agent) => (
+    agent.transport === 'terminal' && agent.terminal && agent.terminal.inputBox
+  ));
+  if (inputBoxEnabled && cfg.delivery.forcedDraftHoldMs >= cfg.delivery.forcedGraceMs) {
+    throw new Error('delivery.forcedDraftHoldMs must be shorter than delivery.forcedGraceMs when terminal.inputBox is enabled');
+  }
+
+  return { config: cfg, agents };
 }
 
 module.exports = { load, validateAgents, validateProjects, normalizeAgent, expandTilde, stripComments, DEFAULTS };

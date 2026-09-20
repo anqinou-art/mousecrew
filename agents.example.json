@@ -52,7 +52,8 @@
       "aliases": [],
       "// transport": "terminal = an interactive TUI you also use. Needs the terminal adapter (batch 2).",
       "transport": "terminal",
-      "terminal": { "adapter": "tmux", "target": "scout" },
+      "// inputBox": "Optional: claude-code delays delivery while its input text is changing.",
+      "terminal": { "adapter": "tmux", "target": "scout", "inputBox": "claude-code" },
       "repos": ["myproject"],
       "canMerge": false
     },

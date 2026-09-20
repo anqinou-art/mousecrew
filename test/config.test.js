@@ -79,6 +79,15 @@ test('two local agents cannot resolve to the same workDir', () => {
   assert.ok(errors.some((error) => /agent "b".*agent "a".*mousecrew-shared/.test(error)));
 });
 
+test('terminal input-box detection only accepts a known reader', () => {
+  assert.deepEqual(ok([
+    { id: 'term', transport: 'terminal', terminal: { adapter: 'tmux', inputBox: 'claude-code' } },
+  ]), []);
+  assert.ok(ok([
+    { id: 'term', transport: 'terminal', terminal: { adapter: 'tmux', inputBox: 'unknown-cli' } },
+  ]).some((error) => /terminal\.inputBox must be "claude-code"/.test(error)));
+});
+
 test('the old verifyRepos array is refused with the object format in the error', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-config-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -111,17 +120,49 @@ test('delivery batching config has defaults and refuses invalid types at startup
     inlineLimit: 600,
     forceOnExpiry: true,
     forcedGraceMs: 120000,
+    draftQuietMs: 120000,
+    forcedDraftHoldMs: 90000,
   });
   for (const [delivery, expected] of [
     [{ batchGroup: 'yes' }, /delivery\.batchGroup must be a boolean/],
     [{ inlineLimit: 0 }, /delivery\.inlineLimit must be a positive integer/],
     [{ forceOnExpiry: 'yes' }, /delivery\.forceOnExpiry must be a boolean/],
     [{ forcedGraceMs: 0 }, /delivery\.forcedGraceMs must be a positive integer/],
+    [{ draftQuietMs: 0 }, /delivery\.draftQuietMs must be a positive integer/],
+    [{ forcedDraftHoldMs: -1 }, /delivery\.forcedDraftHoldMs must be a non-negative integer/],
   ]) {
     const configFile = path.join(dir, `config-${Object.keys(delivery)[0]}.json`);
     fs.writeFileSync(configFile, JSON.stringify({ delivery }));
     assert.throws(() => load({ configFile, agentsFile, root: dir }), expected);
   }
+});
+
+test('draft hold timing only constrains rosters that enable input-box detection', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-draft-config-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const configFile = path.join(dir, 'config.json');
+  const agentsFile = path.join(dir, 'agents.json');
+  fs.writeFileSync(configFile, JSON.stringify({ delivery: { forcedGraceMs: 60000 } }));
+  fs.writeFileSync(agentsFile, JSON.stringify({
+    agents: [{ id: 'worker', transport: 'terminal', terminal: { adapter: 'fake' } }],
+  }));
+
+  assert.equal(load({ configFile, agentsFile, root: dir }).config.delivery.forcedGraceMs, 60000,
+    'an existing short grace remains valid while the new gate is disabled');
+
+  fs.writeFileSync(agentsFile, JSON.stringify({
+    agents: [{
+      id: 'worker', transport: 'terminal',
+      terminal: { adapter: 'fake', inputBox: 'claude-code' },
+    }],
+  }));
+  assert.throws(
+    () => load({ configFile, agentsFile, root: dir }),
+    /delivery\.forcedDraftHoldMs must be shorter than delivery\.forcedGraceMs when terminal\.inputBox is enabled/,
+  );
+
+  fs.writeFileSync(configFile, JSON.stringify({ delivery: { forcedGraceMs: 120000 } }));
+  assert.equal(load({ configFile, agentsFile, root: dir }).config.delivery.forcedDraftHoldMs, 90000);
 });
 
 test('an empty roster is an error, not an empty crew', () => {
