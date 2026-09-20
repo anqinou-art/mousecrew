@@ -369,6 +369,59 @@ test('session-activity updates only the matching SessionStart record', async (t)
   assert.equal(fs.readFileSync(file, 'utf8'), before);
 });
 
+test('an old activity hook cannot replace a newer SessionStart record', async (t) => {
+  const root = localCrewRoot(t);
+  const env = { MOUSECREW_ROOT: root, MOUSECREW_WINDOW: '%1' };
+  const file = rotation.sessionRecordPath(path.join(root, 'data', 'sessions'), 'scout');
+  const oldStart = await runCli(['session-record', '--as', 'scout'], 'http://unused', {
+    env,
+    input: JSON.stringify({ session_id: 'session-a', transcript_path: '/tmp/a.jsonl' }),
+  });
+  assert.equal(oldStart.code, 0, oldStart.stderr);
+
+  const signal = path.join(root, 'idle-before-rename');
+  const shim = path.join(root, 'delay-idle-rename.cjs');
+  fs.writeFileSync(shim, `
+const fs = require('fs');
+const rename = fs.renameSync;
+fs.renameSync = (from, to) => {
+  const text = fs.readFileSync(from, 'utf8');
+  if (text.includes('"sessionId": "session-a"') && text.includes('"state": "idle"')) {
+    fs.writeFileSync(process.env.MOUSECREW_TEST_SIGNAL, 'ready');
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2000);
+  }
+  return rename(from, to);
+};
+`);
+  const oldIdle = runCli(['session-activity', '--as', 'scout', 'idle'], 'http://unused', {
+    env: { ...env, NODE_OPTIONS: `--require=${shim}`, MOUSECREW_TEST_SIGNAL: signal },
+    input: JSON.stringify({ session_id: 'session-a' }),
+  });
+  const deadline = Date.now() + 3000;
+  while (!fs.existsSync(signal) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(fs.existsSync(signal), true, 'old activity reached its commit point');
+
+  const newStart = await runCli(['session-record', '--as', 'scout'], 'http://unused', {
+    env,
+    input: JSON.stringify({ session_id: 'session-b', transcript_path: '/tmp/b.jsonl' }),
+  });
+  assert.equal(newStart.code, 0, newStart.stderr);
+  const newBusy = await runCli(['session-activity', '--as', 'scout', 'busy'], 'http://unused', {
+    env, input: JSON.stringify({ session_id: 'session-b' }),
+  });
+  assert.equal(newBusy.code, 0, newBusy.stderr);
+  const oldResult = await oldIdle;
+  assert.equal(oldResult.code, 0, oldResult.stderr);
+
+  const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(record.sessionId, 'session-b');
+  assert.equal(record.transcriptPath, '/tmp/b.jsonl');
+  assert.equal(record.activity.state, 'busy');
+  assert.equal(record.activity.sessionId, 'session-b');
+});
+
 test('session-record keeps an encoded-looking id separate from the id that encodes to it', async (t) => {
   const ids = ['../scout', 'id-Li4vc2NvdXQ'];
   const root = localCrewRoot(t, ids.map((id, index) => ({

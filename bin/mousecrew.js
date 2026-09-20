@@ -489,22 +489,19 @@ async function main() {
       }
 
       const sessionDir = rotation.sessionDirectory(config);
-      const record = rotation.readSessionRecord(sessionDir, cfg.id);
       const sessionId = hook.session_id.trim();
-      if (!record || record.windowRef !== windowRef || record.sessionId !== sessionId) {
+      let result;
+      try {
+        result = rotation.updateSessionActivity(sessionDir, cfg.id, {
+          state, recordedAt: new Date().toISOString(), windowRef, sessionId,
+        });
+      }
+      catch (error) { die(`cannot record session activity (${error.message})`); }
+      if (!result.updated) {
         console.log(`ignored ${state} activity for ${cfg.id}: window or session does not match SessionStart`);
         break;
       }
-      record.activity = {
-        state,
-        recordedAt: new Date().toISOString(),
-        windowRef,
-        sessionId,
-      };
-      let file;
-      try { file = rotation.writeSessionRecord(sessionDir, record); }
-      catch (error) { die(`cannot record session activity (${error.message})`); }
-      console.log(`recorded ${cfg.id} ${state} activity for ${windowRef} in ${file}`);
+      console.log(`recorded ${cfg.id} ${state} activity for ${windowRef} in ${result.file}`);
       break;
     }
 

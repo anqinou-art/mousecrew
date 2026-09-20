@@ -525,7 +525,7 @@ class Sidecar extends EventEmitter {
   }
 
   _activityVerdict(cfg, ref, screen) {
-    const record = this.sessionDir
+    const record = cfg && this.sessionDir
       ? rotation.readSessionRecord(this.sessionDir, cfg.id)
       : null;
     const activity = rotation.sessionActivity(record, ref);
@@ -534,7 +534,7 @@ class Sidecar extends EventEmitter {
         busy: activity.state === 'busy', source: 'hook', recordedAt: activity.recordedAt,
       };
     }
-    const pattern = cfg.terminal && cfg.terminal.busyPattern !== undefined
+    const pattern = cfg && cfg.terminal && cfg.terminal.busyPattern !== undefined
       ? cfg.terminal.busyPattern : this.opt.busyPattern;
     return { busy: core.isBusy(screen, pattern), source: 'screen', recordedAt: null };
   }

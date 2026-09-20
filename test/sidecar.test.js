@@ -26,8 +26,10 @@ const CREW = [
   { id: 'server-side', displayName: 'server-side', transport: 'local', workDir: '/tmp' },
 ].map(normalizeAgent);
 
-function harness({ windows, now, options, crew = CREW, sessionDir } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-sidecar-'));
+function harness({ windows, now, options, crew = CREW, sessionDir, statePath } = {}) {
+  const dir = statePath
+    ? path.dirname(statePath)
+    : fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-sidecar-'));
   const adapter = createFakeAdapter({
     windows: windows || [
       { ref: '%1', identity: 'lead', screen: '> ' },
@@ -46,7 +48,7 @@ function harness({ windows, now, options, crew = CREW, sessionDir } = {}) {
   const sc = new Sidecar(
     {
       adapter, identity: buildIdentity(crew), agents: crew, client,
-      statePath: path.join(dir, 'state.json'), sessionDir, now: () => clock,
+      statePath: statePath || path.join(dir, 'state.json'), sessionDir, now: () => clock,
     },
     { postInjectMs: 0, ...(options || {}) },
   );
@@ -1127,6 +1129,38 @@ test('the queue survives a restart', async () => {
   );
   assert.equal(revived.state.pending.length, 1);
   assert.equal(revived.state.bootstrapped, true, 'and it does not re-baseline and swallow the backlog again');
+});
+
+test('a restored queue for a removed agent cannot block current roster delivery', async () => {
+  const retiredCrew = [
+    normalizeAgent({
+      id: 'retired', transport: 'terminal',
+      terminal: { adapter: 'fake', target: 'retired' },
+    }),
+    ...CREW,
+  ];
+  const old = primed(harness({ crew: retiredCrew }));
+  old.sc.ingest([
+    msg('human', '@retired old work'),
+    msg('human', '@builder current work', '2026-08-20T12:00:01Z'),
+  ], 'sse');
+  const statePath = path.join(old.dir, 'state.json');
+
+  const current = harness({
+    crew: CREW,
+    statePath,
+    windows: [
+      { ref: '%1', identity: 'retired', screen: '> ' },
+      { ref: '%2', identity: 'builder', screen: '> ' },
+    ],
+  });
+  assert.deepEqual(current.sc.state.pending.map((item) => item.agent), ['retired', 'builder']);
+
+  await current.sc.deliver();
+
+  assert.equal(current.adapter.__test.sentTo('%1').length, 1, 'legacy no-hook delivery is preserved');
+  assert.equal(current.adapter.__test.sentTo('%2').length, 1, 'the current roster still drains');
+  assert.equal(current.sc.state.pending.length, 0);
 });
 
 // ---------- presence ----------

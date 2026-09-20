@@ -3,6 +3,8 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const TAIL_BYTES = 128 * 1024;
+const LOCK_WAIT_MS = 5000;
+const LOCK_RETRY_MS = 10;
 
 function safePart(value) {
   return `id-${Buffer.from(JSON.stringify(String(value)), 'utf8').toString('base64url')}`;
@@ -30,7 +32,36 @@ function readSessionRecord(dir, agent, { readFile = fs.readFileSync } = {}) {
   }
 }
 
-function writeSessionRecord(dir, record, {
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function withSessionRecordLock(dir, agent, action, {
+  mkdir = fs.mkdirSync, chmod = fs.chmodSync, rmdir = fs.rmdirSync,
+  now = Date.now, wait = sleepSync,
+} = {}) {
+  mkdir(dir, { recursive: true, mode: 0o700 });
+  chmod(dir, 0o700);
+  const lock = `${sessionRecordPath(dir, agent)}.lock`;
+  const deadline = now() + LOCK_WAIT_MS;
+  while (true) {
+    try {
+      mkdir(lock, { mode: 0o700 });
+      break;
+    } catch (error) {
+      if (!error || error.code !== 'EEXIST') throw error;
+      if (now() >= deadline) throw new Error(`session record lock timed out: ${lock}`);
+      wait(LOCK_RETRY_MS);
+    }
+  }
+  try {
+    return action();
+  } finally {
+    rmdir(lock);
+  }
+}
+
+function writeSessionRecordUnlocked(dir, record, {
   mkdir = fs.mkdirSync, writeFile = fs.writeFileSync, chmod = fs.chmodSync,
   rename = fs.renameSync, unlink = fs.unlinkSync,
 } = {}) {
@@ -50,13 +81,40 @@ function writeSessionRecord(dir, record, {
   return file;
 }
 
-function invalidateMovedRecord(dir, agent, oldRefs, {
-  readRecord = readSessionRecord, unlink = fs.unlinkSync,
-} = {}) {
-  const record = readRecord(dir, agent);
-  if (!record || !new Set(oldRefs || []).has(record.windowRef)) return false;
-  unlink(sessionRecordPath(dir, agent));
-  return true;
+function writeSessionRecord(dir, record, deps = {}) {
+  return withSessionRecordLock(
+    dir, record.agent, () => writeSessionRecordUnlocked(dir, record, deps), deps,
+  );
+}
+
+function updateSessionActivity(dir, agent, expected, deps = {}) {
+  return withSessionRecordLock(dir, agent, () => {
+    const record = readSessionRecord(dir, agent, deps);
+    if (!record || record.windowRef !== expected.windowRef
+        || record.sessionId !== expected.sessionId) {
+      return { updated: false, file: null };
+    }
+    record.activity = {
+      state: expected.state,
+      recordedAt: expected.recordedAt,
+      windowRef: expected.windowRef,
+      sessionId: expected.sessionId,
+    };
+    return {
+      updated: true,
+      file: writeSessionRecordUnlocked(dir, record, deps),
+    };
+  }, deps);
+}
+
+function invalidateMovedRecord(dir, agent, oldRefs, deps = {}) {
+  const { readRecord = readSessionRecord, unlink = fs.unlinkSync } = deps;
+  return withSessionRecordLock(dir, agent, () => {
+    const record = readRecord(dir, agent);
+    if (!record || !new Set(oldRefs || []).has(record.windowRef)) return false;
+    unlink(sessionRecordPath(dir, agent));
+    return true;
+  }, deps);
 }
 
 function sessionActivity(record, currentRef) {
@@ -196,6 +254,7 @@ function rotateBody(agent, measurement, handoffDir, now = new Date()) {
 
 module.exports = {
   TAIL_BYTES, sessionDirectory, sessionRecordPath, readSessionRecord, writeSessionRecord,
-  invalidateMovedRecord, sessionActivity, readTail, measureTokens, measureMarker, rotationRules, measure,
+  updateSessionActivity, invalidateMovedRecord, sessionActivity,
+  readTail, measureTokens, measureMarker, rotationRules, measure,
   rotateKey, rotateSourceState, rotateBody, formatMeasurement,
 };
