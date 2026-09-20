@@ -337,6 +337,46 @@ test('the old session id arriving after the deadline keeps the failed result', a
   rt.destroy();
 });
 
+test('a forced new session supersedes timed-out graceful verification', async () => {
+  const { rt, procs } = makeRuntime({ rotateVerifyMs: 10 });
+  rt.sessionId = 'original';
+  rt.rotate();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const gracefulFailure = { ...rt.lastRotate };
+
+  rt.newSession();
+  rt.start();
+  procs[1].say({ type: 'system', subtype: 'init', session_id: 'forced-new' });
+
+  assert.equal(rt.sessionId, 'forced-new', 'the forced replacement still owns the session');
+  assert.deepEqual(rt.lastRotate, gracefulFailure, 'its init cannot settle the earlier request');
+  assert.equal(rt.status().rotationStatus, 'failed');
+  const work = rt.send('FORCED WORK');
+  assert.equal(JSON.parse(procs[1].written[0]).message.content, 'FORCED WORK',
+    'the superseded graceful request cannot leave its briefing behind');
+  procs[1].say({ type: 'result', result: 'done', session_id: 'forced-new' });
+  await work;
+  rt.destroy();
+});
+
+test('a forced new session also cancels a graceful request still queued behind work', async () => {
+  const { rt, procs } = makeRuntime();
+  const current = rt.send('current work');
+  await new Promise((resolve) => setImmediate(resolve));
+  procs[0].say({ type: 'system', subtype: 'init', session_id: 'original' });
+  assert.deepEqual(rt.rotate(), { queued: true });
+
+  rt.newSession();
+  await assert.rejects(current, /rotate to a fresh session/);
+  assert.equal(rt.status().rotateQueued, false);
+  rt.start();
+  procs[1].say({ type: 'system', subtype: 'init', session_id: 'forced-new' });
+
+  assert.equal(rt.sessionId, 'forced-new');
+  assert.equal(procs[1].killed, undefined, 'the cancelled graceful request cannot rotate again');
+  rt.destroy();
+});
+
 test('two crashes in a row drop the session instead of crash-looping on it', async () => {
   const { rt, procs } = makeRuntime();
   const first = rt.send('x').catch(() => {});

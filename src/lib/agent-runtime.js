@@ -98,6 +98,17 @@ class AgentRuntime extends EventEmitter {
 
   /** Drop the conversation and start a new one on next wake. This is "rotate window". */
   newSession() {
+    this._pendingRotate = null;
+    this._rotateVerify = null;
+    if (this._rotateVerifyTimer) {
+      clearTimeout(this._rotateVerifyTimer);
+      this._rotateVerifyTimer = null;
+    }
+    this._pendingBriefing = null;
+    return this._replaceSession();
+  }
+
+  _replaceSession() {
     const old = this.sessionId;
     this.sessionId = null;
     this.contextTokens = 0;
@@ -135,7 +146,7 @@ class AgentRuntime extends EventEmitter {
     if (this._rotateVerifyTimer.unref) this._rotateVerifyTimer.unref();
 
     const hadProcess = !!this.proc;
-    this.newSession();
+    this._replaceSession();
     if (!hadProcess && this.cfg.runner !== 'exec') this.start();
   }
 
