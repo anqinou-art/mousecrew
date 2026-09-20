@@ -50,11 +50,11 @@ dead one.
 ## How a message gets there
 
 ```
-group message
-   → who is addressed?          (ids normalised first — see below)
-   → which window claims them?  (looked up fresh, never cached)
-   → is that window busy?       (read the screen)
-        busy  → wait; after 10 minutes, force one delivery attempt
+group or direct message → resolve its recipient ┐
+local wake JSON → validate and persist it       ┘
+    → which window claims them?  (looked up fresh, never cached)
+    → is that window busy?       (read the screen)
+        busy  → wait; after 10 minutes, force one delivery attempt (except local wakes)
         free  → is input text changing?  (same screen read; configured agents only)
                   yes → wait for it to become quiet
                   no  → batch consecutive group messages, type once, press Enter
@@ -99,6 +99,31 @@ a forced attempt. A persisted input-box hold earns the same one attempt as a bus
 `delivery.forceOnExpiry` to `false` to expire every message at the original cutoff.
 Forced delivery still checks the input box, but waits there for at most
 `delivery.forcedDraftHoldMs` (default 90 seconds) before deliberately interrupting.
+
+## Local wake directory
+
+Set `delivery.wakeDir` to let another program on the same machine ask a terminal agent to
+look at something without holding an API token. Each `.json` file contains `agent`, `key`,
+`content`, and optional `sender`. The sidecar resolves agent aliases through the configured
+roster, caps content at `delivery.wakeMaxContent` (default 600 characters), and uses the key
+for durable deduplication. Requests from the same `(agent, sender)` merge while one fresh
+wake is already queued.
+
+Write elsewhere and rename into the directory so the sidecar never sees a partial file:
+
+```sh
+tmp=$(mktemp ./state/wake/.request.XXXXXX)
+printf '%s\n' '{"agent":"scout","key":"build-42","content":"check the local build","sender":"build"}' > "$tmp"
+mv "$tmp" ./state/wake/build-42.json
+```
+
+The sidecar creates the directory with mode `0700`. There is no application-level
+authentication: directory permissions are the boundary, so this entrance is only for local
+programs running as the same user. A wake is persisted before its source file is removed.
+Invalid files are rejected with an event; malformed JSON younger than
+`delivery.wakeSettleMs` (default five seconds) waits for the next pass in case a writer did
+not use atomic rename. Wakes are standalone, have no receipt, wait for both the busy and
+input-box gates, and expire without forced delivery.
 
 A dropped *group* message is still in the group history. A dropped *direct* message looks,
 from the sender's side, exactly like being ignored — so that one is reported back, and shows

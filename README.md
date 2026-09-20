@@ -190,6 +190,20 @@ delivery waits at this gate for at most `delivery.forcedDraftHoldMs` (90 seconds
 An unrecognised screen layout fails open, so a different CLI or TUI update behaves exactly
 as if input-box detection were disabled.
 
+Local programs can wake a terminal agent without an API token by setting
+`delivery.wakeDir` and atomically moving a small JSON request into that directory. A request
+contains `agent`, a deduplication `key`, `content`, and an optional `sender`. It is only a
+prompt to look elsewhere, not a data transport: wakes wait for an idle window, never use
+forced delivery, and do not produce receipts. The directory is mode `0700`; this mechanism
+has no authentication of its own and is suitable only for programs running as the same
+local user.
+
+```sh
+tmp=$(mktemp ./state/wake/.request.XXXXXX)
+printf '%s\n' '{"agent":"scout","key":"build-42","content":"check the local build","sender":"build"}' > "$tmp"
+mv "$tmp" ./state/wake/build-42.json
+```
+
 Message body text longer than `delivery.inlineLimit` (600 characters by default) is written
 to a private `0600` file beside the sidecar state. The terminal receives the first part, the
 file path, and an instruction to read the full text before replying. If that file cannot be

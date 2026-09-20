@@ -59,6 +59,12 @@ function harness({ windows, now, options } = {}) {
 const msg = (sender, content, ts = '2026-08-20T12:00:00Z') => ({ content, ts, metadata: { sender } });
 const INPUT_RULE = '─'.repeat(80);
 const inputScreen = (text, prefix = '') => `${prefix}${INPUT_RULE}\n❯ ${text}\n${INPUT_RULE}\nstatus`;
+const enableWakeDir = (h) => {
+  const dir = path.join(h.dir, 'wake');
+  fs.mkdirSync(dir);
+  h.sc.opt.wakeDir = dir;
+  return dir;
+};
 
 /** Get past the baseline pass, which deliberately delivers nothing. */
 function primed(h) {
@@ -238,6 +244,177 @@ test('the input-box gate does nothing while the activity gate is blocking', asyn
   assert.equal(h.of('busy-wait').length, 1);
   assert.equal(h.of('draft-hold').length, 0);
   assert.equal(h.sc.state.pending[0].draftHeldAt, undefined);
+});
+
+test('a local wake is persisted before its source file is removed', () => {
+  const h = primed(harness());
+  const dir = enableWakeDir(h);
+  const source = path.join(dir, 'build.json');
+  fs.writeFileSync(source, JSON.stringify({
+    agent: 'lead', sender: 'builder', key: 'build:42', content: 'inspect the local build',
+  }));
+
+  const result = h.sc.ingestWakeDir();
+
+  assert.deepEqual(result, { queued: 1, rejected: 0, deferred: 0, failed: 0, merged: 0 });
+  assert.equal(fs.existsSync(source), false);
+  assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
+  assert.deepEqual(h.sc.state.pending.map(({ agent, sender, kind, content, sourceKey }) => (
+    { agent, sender, kind, content, sourceKey }
+  )), [{
+    agent: 'architect', sender: 'builder', kind: 'wake',
+    content: 'inspect the local build', sourceKey: 'wake:build:42',
+  }]);
+  assert.equal(JSON.parse(fs.readFileSync(h.sc.statePath, 'utf8')).pending[0].sourceKey, 'wake:build:42');
+});
+
+test('a failed wake save rolls back the queue and dedupe marker, then retries the same file', () => {
+  const h = primed(harness({ options: { maxPending: 1 } }));
+  const dir = enableWakeDir(h);
+  const source = path.join(dir, 'retry.json');
+  fs.writeFileSync(source, JSON.stringify({ agent: 'lead', key: 'retry-me', content: 'try again' }));
+  h.sc.queue({
+    agent: 'architect', kind: 'dm', sender: 'human', content: 'keep me on failure', dmId: 'old-dm',
+  });
+  h.sc._saveState();
+  const save = h.sc._saveState.bind(h.sc);
+  let fail = true;
+  h.sc._saveState = () => (fail ? false : save());
+
+  const first = h.sc.ingestWakeDir();
+  assert.deepEqual(first, { queued: 0, rejected: 0, deferred: 0, failed: 1, merged: 0 });
+  assert.equal(fs.existsSync(source), true);
+  assert.deepEqual(h.sc.state.pending.map((item) => item.content), ['keep me on failure']);
+  assert.equal(h.sc.state.acks.length, 0, 'an evicted direct-message receipt is rolled back too');
+  assert.equal(h.sc.state.seen.includes('wake:retry-me'), false);
+  assert.equal(h.of('dropped-overflow').length, 0, 'failed staging does not claim an eviction');
+
+  fail = false;
+  const second = h.sc.ingestWakeDir();
+  assert.deepEqual(second, { queued: 1, rejected: 0, deferred: 0, failed: 0, merged: 0 });
+  assert.equal(fs.existsSync(source), false);
+  assert.deepEqual(h.sc.state.pending.map((item) => item.content), ['try again']);
+  assert.deepEqual(h.sc.state.acks.map((ack) => ack.dmId), ['old-dm']);
+  const persisted = JSON.parse(fs.readFileSync(h.sc.statePath, 'utf8'));
+  assert.deepEqual(persisted.pending.map((item) => item.content), ['try again']);
+  assert.deepEqual(persisted.acks.map((ack) => ack.dmId), ['old-dm']);
+});
+
+test('wake files deduplicate by key and merge a fresh queued agent-sender pair', () => {
+  const h = primed(harness());
+  const dir = enableWakeDir(h);
+  fs.writeFileSync(path.join(dir, 'a.json'), JSON.stringify({
+    agent: 'lead', sender: 'scheduler', key: 'first', content: 'first notice',
+  }));
+  fs.writeFileSync(path.join(dir, 'b.json'), JSON.stringify({
+    agent: 'lead', sender: 'scheduler', key: 'second', content: 'redundant notice',
+  }));
+
+  assert.deepEqual(h.sc.ingestWakeDir(), {
+    queued: 1, rejected: 0, deferred: 0, failed: 0, merged: 1,
+  });
+  assert.equal(h.sc.state.pending.length, 1);
+  assert.equal(h.sc.state.pending[0].content, 'first notice');
+
+  fs.writeFileSync(path.join(dir, 'duplicate.json'), JSON.stringify({
+    agent: 'lead', sender: 'different sender', key: 'first', content: 'same key',
+  }));
+  assert.deepEqual(h.sc.ingestWakeDir(), {
+    queued: 0, rejected: 0, deferred: 0, failed: 0, merged: 0,
+  });
+  assert.equal(h.sc.state.pending.length, 1);
+  assert.equal(h.of('wake-duplicate').length, 1);
+});
+
+test('an expired queued wake is not a merge target for a fresh file', () => {
+  const h = primed(harness());
+  const dir = enableWakeDir(h);
+  h.sc.state.pending.push({
+    agent: 'architect', sender: 'scheduler', kind: 'wake', content: 'old',
+    sourceKey: 'wake:old', queuedAt: new Date(h.sc.now() - 11 * 60 * 1000).toISOString(),
+  });
+  fs.writeFileSync(path.join(dir, 'fresh.json'), JSON.stringify({
+    agent: 'lead', sender: 'scheduler', key: 'fresh', content: 'new notice',
+  }));
+
+  const result = h.sc.ingestWakeDir();
+
+  assert.equal(result.queued, 1);
+  assert.equal(result.merged, 0);
+  assert.deepEqual(h.sc.state.pending.map((item) => item.content), ['old', 'new notice']);
+});
+
+test('young partial JSON waits, while old JSON and invalid fields are rejected with reasons', () => {
+  const h = primed(harness());
+  const dir = enableWakeDir(h);
+  const young = path.join(dir, 'young.json');
+  const old = path.join(dir, 'old.json');
+  const invalid = path.join(dir, 'invalid.json');
+  fs.writeFileSync(young, '{"agent":"lead"');
+  fs.writeFileSync(old, '{"agent":"lead"');
+  fs.writeFileSync(invalid, JSON.stringify({ agent: 'missing', key: 'k', content: 'x' }));
+  const now = Date.now();
+  fs.utimesSync(young, now / 1000, now / 1000);
+  fs.utimesSync(old, (now - 6000) / 1000, (now - 6000) / 1000);
+
+  const result = h.sc.ingestWakeDir({ now });
+
+  assert.deepEqual(result, { queued: 0, rejected: 2, deferred: 1, failed: 0, merged: 0 });
+  assert.equal(fs.existsSync(young), true);
+  assert.equal(fs.existsSync(old), false);
+  assert.equal(fs.existsSync(invalid), false);
+  assert.equal(h.of('wake-rejected').length, 2);
+  assert.ok(h.of('wake-rejected').every((event) => event.reason));
+});
+
+test('a wake scan failure cannot stop ordinary delivery', async () => {
+  const h = primed(harness());
+  const notDirectory = path.join(h.dir, 'wake-file');
+  fs.writeFileSync(notDirectory, 'not a directory');
+  h.sc.opt.wakeDir = notDirectory;
+  h.sc.queue({ agent: 'architect', kind: 'group', sender: 'human', content: 'keep delivering' });
+
+  await assert.doesNotReject(() => h.sc.deliver());
+
+  assert.equal(h.adapter.__test.sentTo('%1').length, 1);
+  assert.equal(h.of('wake-file-failed').length, 1);
+});
+
+test('a local wake passes through the existing draft gate', async () => {
+  const h = primed(harness({
+    windows: [{ ref: '%1', identity: 'lead', screen: inputScreen('still typing') }],
+  }));
+  const dir = enableWakeDir(h);
+  fs.writeFileSync(path.join(dir, 'wake.json'), JSON.stringify({
+    agent: 'lead', key: 'draft-wake', content: 'check local state',
+  }));
+
+  await h.sc.deliver();
+
+  assert.equal(h.adapter.__test.sentTo('%1').length, 0);
+  assert.equal(h.sc.state.pending[0].kind, 'wake');
+  assert.ok(h.sc.state.pending[0].draftHeldAt);
+  assert.equal(h.of('draft-hold').length, 1);
+});
+
+test('a busy local wake expires without forced delivery', async () => {
+  const h = primed(harness({
+    windows: [{ ref: '%1', identity: 'lead', screen: inputScreen('typing', 'busy (esc to interrupt)\n') }],
+  }));
+  const dir = enableWakeDir(h);
+  fs.writeFileSync(path.join(dir, 'wake.json'), JSON.stringify({
+    agent: 'lead', key: 'wake-once', content: 'check local state',
+  }));
+
+  await h.sc.deliver();
+  assert.equal(h.sc.state.pending[0].kind, 'wake');
+  assert.equal(h.of('busy-wait').length, 1);
+  h.advance(11 * 60 * 1000);
+  await h.sc.deliver();
+
+  assert.equal(h.of('forced').length, 0);
+  assert.equal(h.of('expired').length, 1);
+  assert.equal(h.adapter.__test.sentTo('%1').length, 0);
 });
 
 test('five consecutive group messages are injected and persisted as one batch', async () => {

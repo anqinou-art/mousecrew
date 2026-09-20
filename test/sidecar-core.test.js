@@ -12,6 +12,42 @@ const identity = buildIdentity([
 const terminalIds = ['architect', 'builder', 'scout'];
 const targets = (sender, content) => core.mentionTargets({ identity, terminalIds }, sender, content).sort();
 
+test('local wake requests normalise terminal identities and reject invalid fields', () => {
+  assert.deepEqual(core.parseWakeRequest(JSON.stringify({
+    agent: 'lead', key: 'build:ready', content: 'check the local build',
+  }), { identity, terminalIds }), {
+    agent: 'architect', sender: 'local', content: 'check the local build', key: 'wake:build:ready',
+  });
+  assert.deepEqual(core.parseWakeRequest(JSON.stringify({
+    agent: 'builder', sender: 'scheduler', key: 'nightly', content: 'inspect the report', kind: 'dm',
+  }), { identity, terminalIds }), {
+    agent: 'builder', sender: 'scheduler', content: 'inspect the report', key: 'wake:nightly',
+  });
+
+  for (const [raw, expected] of [
+    ['{broken', /not valid JSON/],
+    ['[]', /top level must be an object/],
+    [JSON.stringify({ agent: 7, key: 'k', content: 'x' }), /agent must be a string/],
+    [JSON.stringify({ agent: 'unknown', key: 'k', content: 'x' }), /not a terminal agent/],
+    [JSON.stringify({ agent: 'builder', content: 'x' }), /key is required/],
+    [JSON.stringify({ agent: 'builder', key: 'k' }), /content is required/],
+    [JSON.stringify({ agent: 'builder', key: 'k', content: 'xxxx' }), /exceeds 3/],
+  ]) {
+    assert.match(core.parseWakeRequest(raw, { identity, terminalIds, maxContent: 3 }).error, expected);
+  }
+});
+
+test('pending wake merging uses the same freshness decision as expiry', () => {
+  const now = 1_000_000;
+  const pending = [
+    { kind: 'wake', agent: 'architect', sender: 'local', queuedAt: new Date(now - 1000).toISOString() },
+    { kind: 'wake', agent: 'builder', sender: 'local', queuedAt: new Date(now - 11 * 60 * 1000).toISOString() },
+  ];
+  assert.equal(core.hasPendingWake('architect', 'local', pending, now), true);
+  assert.equal(core.hasPendingWake('builder', 'local', pending, now), false);
+  assert.equal(core.hasPendingWake('architect', 'someone-else', pending, now), false);
+});
+
 // ---------- the bug this whole module is shaped around ----------
 
 test('a crew member is never delivered its own group message', () => {
@@ -170,6 +206,21 @@ test('forced delivery planning has four outcomes and merged direct messages reta
   assert.deepEqual(items[0].mergedFrom.map((source) => source.dmId), ['d1', 'd2']);
   assert.match(items[0].content, /first[\s\S]*second/);
   assert.equal(items[2].content, 'third', 'group batching remains owned by the group path');
+});
+
+test('a local wake is a standalone envelope and never gains forced delivery', () => {
+  const wake = {
+    agent: 'architect', kind: 'wake', sender: 'scheduler', content: 'check the build',
+    draftHeldAt: 'earlier',
+  };
+  const group = { agent: 'architect', kind: 'group', content: 'group message' };
+
+  assert.deepEqual(core.nextDeliverableBatch([wake, group], 'architect'), [wake]);
+  assert.equal(core.envelope(wake), '[local wake · scheduler] check the build');
+  assert.equal(core.batchEnvelope({ items: [wake], agent: 'architect', bodyFile: '/tmp/wake.txt', inlineLimit: 5 }),
+    '[local wake · scheduler] check\n\n[truncated — read the full message before replying: /tmp/wake.txt]');
+  assert.deepEqual(core.markForcedDeliveries([wake], 1_000_000, true), { forced: [], absorbed: [] });
+  assert.equal(wake.forcedAt, undefined);
 });
 
 test('an idle expired item only earns forced delivery after a persisted draft hold', () => {

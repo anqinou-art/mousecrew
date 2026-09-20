@@ -18,6 +18,7 @@ const { normalizeVerifyRepos, normalizeDeployTrees } = require('./lib/commit-ver
 const {
   DEFAULT_BATCH_GROUP, DEFAULT_INLINE_LIMIT,
   DEFAULT_FORCE_ON_EXPIRY, DEFAULT_FORCED_GRACE_MS,
+  DEFAULT_WAKE_MAX_CONTENT, DEFAULT_WAKE_SETTLE_MS,
 } = require('./lib/sidecar-core');
 const {
   DEFAULT_DRAFT_QUIET_MS, DEFAULT_FORCED_DRAFT_HOLD_MS,
@@ -77,6 +78,9 @@ const DEFAULTS = {
     forcedGraceMs: DEFAULT_FORCED_GRACE_MS,
     draftQuietMs: DEFAULT_DRAFT_QUIET_MS,
     forcedDraftHoldMs: DEFAULT_FORCED_DRAFT_HOLD_MS,
+    wakeDir: null,
+    wakeMaxContent: DEFAULT_WAKE_MAX_CONTENT,
+    wakeSettleMs: DEFAULT_WAKE_SETTLE_MS,
   },
   contextWatch: { enabled: true, thresholdTurns: 10, noHandoff: [], handoffDir: './data/handoff' },
   notify: { type: 'none', url: '' },
@@ -266,6 +270,19 @@ function load({ configFile, agentsFile, root } = {}) {
   }
   if (!Number.isInteger(cfg.delivery.forcedDraftHoldMs) || cfg.delivery.forcedDraftHoldMs < 0) {
     throw new Error('delivery.forcedDraftHoldMs must be a non-negative integer');
+  }
+  if (cfg.delivery.wakeDir !== null
+      && (typeof cfg.delivery.wakeDir !== 'string' || !cfg.delivery.wakeDir.trim())) {
+    throw new Error('delivery.wakeDir must be a non-empty path when configured');
+  }
+  if (!Number.isInteger(cfg.delivery.wakeMaxContent) || cfg.delivery.wakeMaxContent < 1) {
+    throw new Error('delivery.wakeMaxContent must be a positive integer');
+  }
+  if (!Number.isInteger(cfg.delivery.wakeSettleMs) || cfg.delivery.wakeSettleMs < 0) {
+    throw new Error('delivery.wakeSettleMs must be a non-negative integer');
+  }
+  if (cfg.delivery.wakeDir !== null) {
+    cfg.delivery.wakeDir = path.resolve(base, expandTilde(cfg.delivery.wakeDir));
   }
   const projectConfig = validateProjects(cfg.projects);
   if (projectConfig.errors.length) {
