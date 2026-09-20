@@ -94,6 +94,30 @@ are configured, creating an order requires `-p`; the server lists the valid ids 
 or unknown. Existing configurations without `projects` remain valid and keep using
 `orderPrefix` (or `WO`) without requiring a project.
 
+### Commit and deployment verification
+
+`verifyRepos` maps each order `repo` name to the local clones that may contain submitted
+commits. A missing key means the repo has not been configured; an explicit empty list means
+this machine is known not to have a clone. `deployTrees` optionally maps a repo to the git
+working tree that actually runs in production:
+
+```json
+{
+  "verifyRepos": {
+    "server": ["~/worktrees/server-dev", "~/worktrees/server-audit"],
+    "desktop": []
+  },
+  "deployTrees": { "server": "~/services/server" }
+}
+```
+
+Before `restart-done` closes an order whose repo has a deployment tree, mousecrew verifies
+that the recorded commit is an ancestor of that tree's `HEAD`. Orders that fail are named
+and left open while independent orders still close. Repos without a deployment-tree mapping
+still close but are reported as unchecked, and orders without a recorded commit are called
+out separately. Passing order ids closes only those pending orders. This is verification,
+not deployment: mousecrew still does not pull, deploy, or restart anything.
+
 `bin/mousecrew.js` with no arguments prints every command.
 
 ### Try it without any AI at all
@@ -231,7 +255,7 @@ All endpoints require `Authorization: Bearer <token>`. There is no grace mode.
 | `POST /api/orders/:id/pause` `/resume` `/assign` | blocking and assignment |
 | `POST /api/orders/:id/unfreeze` | withdraw a frozen review version and return it for changes |
 | `POST /api/orders/:id/logs` | append an agent log line to the order |
-| `POST /api/orders/restart-done` | close everything that was waiting on a restart |
+| `POST /api/orders/restart-done` | close named `ids`, or everything waiting; verify configured deployment trees first |
 | `GET/POST /api/threads` | list / open a thread |
 | `GET /api/threads/:name` | one thread with its plan and log |
 | `PATCH /api/threads/:name` | set one field — `plan` and `snapshot` are refused here by design |

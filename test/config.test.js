@@ -1,6 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { validateAgents, validateProjects } = require('../src/config');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { load, validateAgents, validateProjects } = require('../src/config');
 
 const ok = (agents) => validateAgents(agents).errors;
 
@@ -66,6 +69,30 @@ test('duplicate ids are caught', () => {
     { id: 'dup', transport: 'local', workDir: '/tmp/b' },
   ]);
   assert.ok(errors.some((e) => /duplicate id/.test(e)));
+});
+
+test('two local agents cannot resolve to the same workDir', () => {
+  const errors = ok([
+    { id: 'a', transport: 'local', workDir: '/tmp/mousecrew-shared' },
+    { id: 'b', transport: 'local', workDir: '/tmp/../tmp/mousecrew-shared' },
+  ]);
+  assert.ok(errors.some((error) => /agent "b".*agent "a".*mousecrew-shared/.test(error)));
+});
+
+test('the old verifyRepos array is refused with the object format in the error', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-config-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const configFile = path.join(dir, 'config.json');
+  const agentsFile = path.join(dir, 'agents.json');
+  fs.writeFileSync(configFile, JSON.stringify({ verifyRepos: ['/tmp/repo'] }));
+  fs.writeFileSync(agentsFile, JSON.stringify({
+    agents: [{ id: 'worker', transport: 'local', workDir: '/tmp/worker' }],
+  }));
+
+  assert.throws(
+    () => load({ configFile, agentsFile, root: dir }),
+    /verifyRepos: expected an object keyed by repo.*\{ "repo": \["\/path\/to\/clone"\] \}/,
+  );
 });
 
 test('an empty roster is an error, not an empty crew', () => {

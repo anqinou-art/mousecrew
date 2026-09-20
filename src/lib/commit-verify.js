@@ -9,6 +9,8 @@
 // Every failure path leads to unverified. None leads to "assume it's fine".
 
 const { execFileSync } = require('child_process');
+const path = require('path');
+const os = require('os');
 
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
 
@@ -18,6 +20,100 @@ function git(repoPath, args, timeoutMs) {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trim();
+}
+
+function expandTilde(p) {
+  if (p === '~') return os.homedir();
+  if (p.startsWith('~/')) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+
+function normalizeRepoMap(name, value, baseDir, many) {
+  if (value === undefined) return {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    const shape = many ? '{ "repo": ["/path/to/clone"] }' : '{ "repo": "/path/to/deploy-tree" }';
+    throw new Error(`${name}: expected an object keyed by repo; use ${shape}`);
+  }
+
+  const normalized = {};
+  for (const [repo, configured] of Object.entries(value)) {
+    if (!repo.trim()) throw new Error(`${name}: repo names must be non-empty`);
+    const paths = many ? configured : [configured];
+    if (!Array.isArray(paths) || paths.some((p) => typeof p !== 'string' || !p.trim())) {
+      throw new Error(`${name}.${repo}: expected ${many ? 'an array of paths' : 'one path string'}`);
+    }
+    const resolved = paths.map((p) => path.resolve(baseDir || process.cwd(), expandTilde(p)));
+    normalized[repo] = many ? resolved : resolved[0];
+  }
+  return normalized;
+}
+
+function normalizeVerifyRepos(value, baseDir) {
+  return normalizeRepoMap('verifyRepos', value, baseDir, true);
+}
+
+function normalizeDeployTrees(value, baseDir) {
+  return normalizeRepoMap('deployTrees', value, baseDir, false);
+}
+
+function reposFor(repoName, verifyRepos) {
+  if (!repoName || !Object.prototype.hasOwnProperty.call(verifyRepos, repoName)) {
+    return { paths: [], reason: 'no-repos-configured' };
+  }
+  const paths = verifyRepos[repoName];
+  if (Object.prototype.hasOwnProperty.call(verifyRepos, repoName) && paths.length === 0) {
+    return { paths, reason: 'repo-not-cloned-on-this-machine' };
+  }
+  return { paths };
+}
+
+function verifyCommitForRepo(commit, repoName, verifyRepos, opts = {}) {
+  const claimed = String(commit || '').trim();
+  if (!SHA_RE.test(claimed)) return { verified: false, reason: 'malformed-commit' };
+  const selected = reposFor(repoName, verifyRepos);
+  if (selected.reason) return { verified: false, reason: selected.reason };
+  return verifyCommit(claimed, selected.paths, opts);
+}
+
+function checkDeployTree(tree, opts = {}) {
+  const timeoutMs = opts.timeoutMs || 2000;
+  try {
+    if (git(tree, ['rev-parse', '--is-inside-work-tree'], timeoutMs) !== 'true') {
+      return { ok: false, reason: 'invalid-deploy-tree' };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, reason: 'invalid-deploy-tree' };
+  }
+}
+
+function commitInDeployTree(commit, tree, opts = {}) {
+  const claimed = String(commit || '').trim();
+  if (!SHA_RE.test(claimed)) return { ok: false, reason: 'malformed-commit' };
+  try {
+    git(tree, ['merge-base', '--is-ancestor', claimed, 'HEAD'], opts.timeoutMs || 2000);
+    return { ok: true };
+  } catch {
+    return { ok: false, reason: 'commit-not-in-deploy-tree' };
+  }
+}
+
+function makeDeploymentCheck(deployTrees, opts = {}) {
+  const treeChecks = new Map();
+  return function checkDeployment(commit, repoName) {
+    const noCommit = !String(commit || '').trim();
+    if (!repoName || !Object.prototype.hasOwnProperty.call(deployTrees, repoName)) {
+      return { ok: true, unchecked: true, noCommit };
+    }
+
+    if (!treeChecks.has(repoName)) {
+      treeChecks.set(repoName, checkDeployTree(deployTrees[repoName], opts));
+    }
+    const treeCheck = treeChecks.get(repoName);
+    if (!treeCheck.ok) return treeCheck;
+    if (noCommit) return { ok: true, noCommit: true };
+    return commitInDeployTree(commit, deployTrees[repoName], opts);
+  };
 }
 
 /**
@@ -101,4 +197,15 @@ function makeVerifyBudget({ limit = 10, windowMs = 60_000 } = {}) {
   };
 }
 
-module.exports = { verifyCommit, makeVerifyBudget, SHA_RE };
+module.exports = {
+  verifyCommit,
+  verifyCommitForRepo,
+  reposFor,
+  checkDeployTree,
+  commitInDeployTree,
+  makeDeploymentCheck,
+  normalizeVerifyRepos,
+  normalizeDeployTrees,
+  makeVerifyBudget,
+  SHA_RE,
+};

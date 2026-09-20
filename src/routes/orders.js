@@ -13,7 +13,11 @@ const {
   checkTransition,
   transition,
 } = require('../lib/order-state-machine');
-const { verifyCommit, makeVerifyBudget } = require('../lib/commit-verify');
+const {
+  verifyCommitForRepo,
+  makeDeploymentCheck,
+  makeVerifyBudget,
+} = require('../lib/commit-verify');
 const { makeWakeFreshness, ownerOf } = require('../lib/wake-freshness');
 const { createAuditFreeze } = require('../lib/audit-freeze');
 
@@ -27,7 +31,8 @@ const CLAIM_TARGETS = {
 function createOrdersRouter({ store, identity, hub, workspace, notifier, requireToken, config }) {
   const router = express.Router();
   const takeBudget = makeVerifyBudget(config.verifyBudget || {});
-  const verifyRepos = (config.verifyRepos || []).slice();
+  const verifyRepos = config.verifyRepos || {};
+  const deployTrees = config.deployTrees || {};
   const auditFreeze = createAuditFreeze(store);
 
   router.use(requireToken);
@@ -485,8 +490,7 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
     if (!takeBudget()) {
       report = { verified: false, reason: 'verify-rate-limited' };
     } else {
-      const repos = verifyRepos.length ? verifyRepos : (o.repo ? [] : []);
-      report = repos.length ? verifyCommit(claimed, repos) : { verified: false, reason: 'no-repos-configured' };
+      report = verifyCommitForRepo(claimed, o.repo, verifyRepos);
     }
 
     // Rule: a newly reported commit takes its file list with it. If we cannot derive one,
@@ -627,7 +631,7 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
   // ---------- bulk close after a restart ----------
 
   router.post('/api/orders/restart-done', (req, res) => {
-    const { actor } = req.body || {};
+    const { actor, ids } = req.body || {};
     // Closing the restart queue asserts "the restart happened". Restarting is a human
     // act, so a human (any actor not on the roster) may say so, and the merge gate may
     // say so — but a working agent must not be able to wipe the queue that tracks whether
@@ -640,12 +644,30 @@ function createOrdersRouter({ store, identity, hub, workspace, notifier, require
         error: `"${actorId}" may not close the restart queue — that is for whoever performed the restart`,
       });
     }
+    if (ids !== undefined && (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string' || !id.trim()))) {
+      return res.status(400).json({ error: 'ids must be an array of non-empty order ids' });
+    }
+
+    const wanted = ids === undefined ? null : new Set(ids);
     const closed = [];
+    const skipped = [];
+    const unchecked = [];
+    const noCommit = [];
+    const checkDeployment = makeDeploymentCheck(deployTrees);
     for (const o of store.order.getByStatus.all('pending_restart')) {
+      if (wanted && !wanted.has(o.id)) continue;
+
+      const deployment = checkDeployment(o.commit_hash, o.repo);
+      if (!deployment.ok) {
+        skipped.push({ id: o.id, reason: deployment.reason });
+        continue;
+      }
+      if (deployment.unchecked) unchecked.push(o.id);
+      if (deployment.noCommit) noCommit.push(o.id);
       const r = moveOrder(o.id, 'closed', actor || 'system', 'closed after restart');
       if (r.ok) closed.push(o.id);
     }
-    res.json({ ok: true, closed });
+    res.json({ ok: true, closed, skipped, unchecked, no_commit: noCommit });
   });
 
   // ---------- logs ----------

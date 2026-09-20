@@ -4,7 +4,12 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { verifyCommit, makeVerifyBudget } = require('../src/lib/commit-verify');
+const {
+  verifyCommit,
+  verifyCommitForRepo,
+  commitInDeployTree,
+  makeVerifyBudget,
+} = require('../src/lib/commit-verify');
 
 function git(dir, ...args) {
   return execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
@@ -32,6 +37,25 @@ test('a malformed sha is refused before any git runs', () => {
 
 test('with no repos configured it says so rather than guessing', () => {
   assert.deepEqual(verifyCommit('abc1234', []), { verified: false, reason: 'no-repos-configured' });
+});
+
+test('a missing repo mapping and an explicit empty mapping stay distinct', () => {
+  const configured = { desktop: [] };
+  assert.deepEqual(
+    verifyCommitForRepo('abc1234', 'unknown', configured),
+    { verified: false, reason: 'no-repos-configured' },
+  );
+  assert.deepEqual(
+    verifyCommitForRepo('abc1234', 'desktop', configured),
+    { verified: false, reason: 'repo-not-cloned-on-this-machine' },
+  );
+});
+
+test('deployment verification rejects malformed commits before invoking git', () => {
+  assert.deepEqual(
+    commitInDeployTree('--upload-pack=bad', '/nonexistent'),
+    { ok: false, reason: 'malformed-commit' },
+  );
 });
 
 test('a commit that exists nowhere locally is unverified, never assumed', () => {

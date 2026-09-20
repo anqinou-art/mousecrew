@@ -96,7 +96,7 @@ const USAGE = `mousecrew — drive the work board
   pause <id> [-s me] --blocked-by <id> "why"
   resume <id> [-s me]
   cancel <id> [-s me] [--void] "why"      cancel work; --void closes work in review
-  restart-done [-s me]                    close everything that was waiting on a restart
+  restart-done [id ...] [-s me]           close named orders, or everything waiting on a restart
   comment <id> [-s me] "text"
   say [--as name] [--no-redispatch] "text"    post to the group
   dm --to <agent> "text"                      message one agent
@@ -291,8 +291,17 @@ async function main() {
     }
 
     case 'restart-done': {
-      const r = await api('POST', '/api/orders/restart-done', { actor: f.actor || 'cli' });
+      const r = await api('POST', '/api/orders/restart-done', {
+        actor: f.actor || 'cli',
+        ...(f._.length ? { ids: f._ } : {}),
+      });
       console.log(r.closed.length ? `closed: ${r.closed.join(', ')}` : 'nothing was waiting on a restart');
+      if (r.unchecked.length) console.log(`unchecked (no deploy tree configured): ${r.unchecked.join(', ')}`);
+      if (r.no_commit.length) console.log(`no commit recorded: ${r.no_commit.join(', ')}`);
+      if (r.skipped.length) {
+        for (const item of r.skipped) console.error(`skipped ${item.id}: ${item.reason}`);
+        process.exitCode = 1;
+      }
       break;
     }
 
