@@ -312,7 +312,7 @@ class AgentRuntime extends EventEmitter {
     if (generation !== this._generation) return;
     this._stdoutBuf += raw.toString();
     let idx;
-    while ((idx = this._stdoutBuf.indexOf('\n')) >= 0) {
+    while (generation === this._generation && (idx = this._stdoutBuf.indexOf('\n')) >= 0) {
       const line = this._stdoutBuf.slice(0, idx).trim();
       this._stdoutBuf = this._stdoutBuf.slice(idx + 1);
       if (!line) continue;
@@ -477,11 +477,9 @@ class AgentRuntime extends EventEmitter {
     if (this._turnHardTimer.unref) this._turnHardTimer.unref();
 
     try {
-      if (this._pendingBriefing) {
-        this._writeMessage(this._pendingBriefing);
-        this._pendingBriefing = null;
-      }
-      this._writeMessage(job.message);
+      const briefing = this._pendingBriefing;
+      this._writeMessage(briefing ? `${briefing}\n\n${job.message}` : job.message);
+      if (briefing) this._pendingBriefing = null;
     } catch (e) {
       this.currentJob = null;
       job.reject(e);
