@@ -58,7 +58,7 @@ function build({ config, agents }) {
   app.get('/healthz', (req, res) => res.json({ ok: true, agents: agents.length }));
 
   app.use(createGroupRouter({ hub, dispatcher, identity, requireToken }));
-  app.use(createProjectsRouter({ config, requireToken }));
+  app.use(createProjectsRouter({ store, config, requireToken }));
   const orders = createOrdersRouter({ store, identity, hub, workspace, notifier, requireToken, config });
   app.use(orders.router);
   app.use(createAgentsRouter({ manager, identity, store, requireToken, config }));
