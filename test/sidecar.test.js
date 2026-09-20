@@ -326,6 +326,106 @@ test('wake files deduplicate by key and merge a fresh queued agent-sender pair',
   assert.equal(h.of('wake-duplicate').length, 1);
 });
 
+test('a merged wake survives source deletion failure without a second delivery', async (t) => {
+  const h = primed(harness());
+  const dir = enableWakeDir(h);
+  fs.writeFileSync(path.join(dir, 'first.json'), JSON.stringify({
+    agent: 'lead', sender: 'scheduler', key: 'first', content: 'first wake',
+  }));
+  assert.equal(h.sc.ingestWakeDir().queued, 1);
+
+  const source = path.join(dir, 'second.json');
+  fs.writeFileSync(source, JSON.stringify({
+    agent: 'lead', sender: 'scheduler', key: 'second', content: 'second wake',
+  }));
+  const unlink = fs.unlinkSync;
+  let fail = true;
+  fs.unlinkSync = (file) => {
+    if (file === source && fail) {
+      fail = false;
+      const error = new Error('permission denied');
+      error.code = 'EACCES';
+      throw error;
+    }
+    return unlink(file);
+  };
+  t.after(() => { fs.unlinkSync = unlink; });
+
+  await h.sc.deliver();
+  assert.equal(fs.existsSync(source), true);
+  assert.equal(h.adapter.__test.sentTo('%1').length, 1);
+  assert.equal(h.sc.state.seen.includes('wake:second'), true);
+  assert.equal(JSON.parse(fs.readFileSync(h.sc.statePath, 'utf8')).seen.includes('wake:second'), true);
+
+  await h.sc.deliver();
+  assert.equal(fs.existsSync(source), false);
+  assert.equal(h.adapter.__test.sentTo('%1').length, 1);
+  assert.equal(h.of('wake-file-failed').filter((event) => event.action === 'delete-source').length, 1);
+});
+
+test('a failed merge save rolls back its dedupe marker and leaves the source retryable', () => {
+  const h = primed(harness());
+  const dir = enableWakeDir(h);
+  fs.writeFileSync(path.join(dir, 'first.json'), JSON.stringify({
+    agent: 'lead', sender: 'scheduler', key: 'first', content: 'first wake',
+  }));
+  assert.equal(h.sc.ingestWakeDir().queued, 1);
+
+  const source = path.join(dir, 'second.json');
+  fs.writeFileSync(source, JSON.stringify({
+    agent: 'lead', sender: 'scheduler', key: 'second', content: 'second wake',
+  }));
+  const save = h.sc._saveState.bind(h.sc);
+  let fail = true;
+  h.sc._saveState = () => (fail ? false : save());
+
+  assert.deepEqual(h.sc.ingestWakeDir(), {
+    queued: 0, rejected: 0, deferred: 0, failed: 1, merged: 0,
+  });
+  assert.equal(fs.existsSync(source), true);
+  assert.equal(h.sc.state.seen.includes('wake:second'), false);
+  assert.deepEqual(h.sc.state.pending.map((item) => item.content), ['first wake']);
+
+  fail = false;
+  assert.deepEqual(h.sc.ingestWakeDir(), {
+    queued: 0, rejected: 0, deferred: 0, failed: 0, merged: 1,
+  });
+  assert.equal(fs.existsSync(source), false);
+  assert.equal(h.sc.state.seen.includes('wake:second'), true);
+  assert.equal(JSON.parse(fs.readFileSync(h.sc.statePath, 'utf8')).seen.includes('wake:second'), true);
+});
+
+test('an enqueued wake also survives source deletion failure without a second delivery', async (t) => {
+  const h = primed(harness());
+  const dir = enableWakeDir(h);
+  const source = path.join(dir, 'wake.json');
+  fs.writeFileSync(source, JSON.stringify({
+    agent: 'lead', sender: 'scheduler', key: 'once', content: 'one wake',
+  }));
+  const unlink = fs.unlinkSync;
+  let fail = true;
+  fs.unlinkSync = (file) => {
+    if (file === source && fail) {
+      fail = false;
+      const error = new Error('permission denied');
+      error.code = 'EACCES';
+      throw error;
+    }
+    return unlink(file);
+  };
+  t.after(() => { fs.unlinkSync = unlink; });
+
+  await h.sc.deliver();
+  assert.equal(fs.existsSync(source), true);
+  assert.equal(h.adapter.__test.sentTo('%1').length, 1);
+  assert.equal(h.sc.state.seen.includes('wake:once'), true);
+
+  await h.sc.deliver();
+  assert.equal(fs.existsSync(source), false);
+  assert.equal(h.adapter.__test.sentTo('%1').length, 1);
+  assert.equal(h.of('wake-file-failed').filter((event) => event.action === 'delete-source').length, 1);
+});
+
 test('an expired queued wake is not a merge target for a fresh file', () => {
   const h = primed(harness());
   const dir = enableWakeDir(h);

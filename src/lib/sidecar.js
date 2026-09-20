@@ -262,6 +262,15 @@ class Sidecar extends EventEmitter {
           request.agent, request.sender, this.state.pending, now,
           this.opt.stalePendingMs, this.opt.forcedGraceMs,
         )) {
+          if (!this.state.seen.includes(request.key)) {
+            const seen = this.state.seen.slice();
+            this._seen(request.key);
+            if (!this._saveState()) {
+              this.state.seen = seen;
+              failed(name, 'persist-merge', new Error('wake merge was not persisted'));
+              continue;
+            }
+          }
           if (!remove(file, name)) continue;
           result.merged += 1;
           this.emit('event', {
