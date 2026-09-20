@@ -173,7 +173,7 @@ test('graceful rotation waits for the current answer, deduplicates requests, and
   const handoffDir = path.join(handoffRoot, 'tester-handoff');
   fs.mkdirSync(handoffDir);
   fs.writeFileSync(path.join(handoffDir, '2026-09-20.md'), 'continue here');
-  const { rt, procs } = makeRuntime({}, {
+  const { rt, procs, dir } = makeRuntime({}, {
     contextWatch: { handoffDir: handoffRoot, noHandoff: [], handoffMaxAgeDays: 7 },
   });
   const first = rt.send('current work');
@@ -201,6 +201,10 @@ test('graceful rotation waits for the current answer, deduplicates requests, and
   assert.deepEqual(
     { ...rt.status().lastRotate, at: 'ignored' },
     { at: 'ignored', ok: true, from: 'old-session', to: 'new-session' },
+  );
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(dir, 'session_tester.json'), 'utf8')).sessionId,
+    'new-session',
   );
   procs[1].say({ type: 'result', result: 'new answer', session_id: 'new-session' });
   assert.equal((await later).text, 'new answer');
