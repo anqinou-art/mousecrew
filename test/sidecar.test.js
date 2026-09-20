@@ -6,7 +6,7 @@ const path = require('path');
 const { Sidecar } = require('../src/lib/sidecar');
 const { createFakeAdapter } = require('../adapters/terminal/fake');
 const { buildIdentity } = require('../src/lib/identity');
-const { normalizeAgent } = require('../src/config');
+const { load, normalizeAgent } = require('../src/config');
 const core = require('../src/lib/sidecar-core');
 
 // These drive the engine against an in-memory terminal and assert its structured events.
@@ -270,6 +270,49 @@ test('a body-file failure falls back to injecting the complete text', async () =
   assert.equal(h.adapter.__test.sentTo('%1')[0], full);
   assert.equal(h.of('body-save-failed').length, 1);
   assert.equal(h.sc.state.pending.length, 0);
+});
+
+test('loaded agent ids cannot navigate long-message writes outside the state inbox', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-inbox-path-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  for (const [id, expectedPartition] of [
+    ['worker', 'worker'],
+    ['../../outside', `id-${Buffer.from('../../outside').toString('base64url')}`],
+  ]) {
+    const caseDir = path.join(root, expectedPartition);
+    const configFile = path.join(caseDir, 'config.json');
+    const agentsFile = path.join(caseDir, 'agents.json');
+    fs.mkdirSync(caseDir, { recursive: true });
+    fs.writeFileSync(configFile, JSON.stringify({ delivery: { inlineLimit: 10 } }));
+    fs.writeFileSync(agentsFile, JSON.stringify({ agents: [{
+      id, displayName: 'target', transport: 'terminal',
+      terminal: { adapter: 'fake', target: 'target' },
+    }] }));
+    const { config, agents } = load({ configFile, agentsFile, root: caseDir });
+    const adapter = createFakeAdapter({ windows: [{ ref: '%1', identity: 'target', screen: '> ' }] });
+    const statePath = path.join(caseDir, 'state', 'state.json');
+    const sc = new Sidecar({
+      adapter, identity: buildIdentity(agents), agents, client: {}, statePath,
+    }, {
+      postInjectMs: 0,
+      batchGroup: config.delivery.batchGroup,
+      inlineLimit: config.delivery.inlineLimit,
+    });
+    sc.queue({ agent: id, kind: 'group', sender: 'human', content: 'complete body' });
+
+    await sc.deliver();
+
+    const injected = adapter.__test.sentTo('%1')[0];
+    const bodyFile = injected.match(/read the full message before replying: (.+)\]\n/)[1];
+    const inbox = path.join(caseDir, 'state', 'inbox');
+    assert.equal(path.relative(inbox, bodyFile).startsWith('..'), false, bodyFile);
+    assert.equal(path.relative(inbox, bodyFile).split(path.sep)[0], expectedPartition);
+    assert.equal(fs.readFileSync(bodyFile, 'utf8'), core.envelope({
+      kind: 'group', agent: id, sender: 'human', content: 'complete body',
+    }));
+    assert.equal(sc.state.pending.length, 0);
+  }
 });
 
 test('batchGroup false preserves one-message-per-pass delivery', async () => {

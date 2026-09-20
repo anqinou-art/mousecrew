@@ -214,7 +214,11 @@ class Sidecar extends EventEmitter {
       return null;
     }
     try {
-      const dir = path.join(path.dirname(this.statePath), 'inbox', String(agent || 'unknown'));
+      const agentId = String(agent || 'unknown');
+      const partition = /^[A-Za-z0-9_-]+$/.test(agentId)
+        ? agentId
+        : `id-${Buffer.from(agentId).toString('base64url')}`;
+      const dir = path.join(path.dirname(this.statePath), 'inbox', partition);
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       const stamp = new Date(this.now()).toISOString().replace(/[:.]/g, '-');
       const file = path.join(dir, `${stamp}-${core.fingerprint(text).slice(0, 8)}.txt`);
