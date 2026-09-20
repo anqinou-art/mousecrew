@@ -15,11 +15,13 @@ upgrading or downgrading.
   snapshot. Audit decisions name that revision, preventing a late decision about an older
   delivery from releasing a newer one; an authorised unfreeze returns the order for changes.
 - Configured projects provide independent, validated ID prefixes and project-scoped listing.
-  Commit verification is selected by the order's repository, and restart completion can
-  verify that the recorded commit has reached the configured deployment tree.
-- Work-order notifications skip self-wakes, are rechecked when they reach the front of the
-  queue, and follow the current action owner. Stale notices no longer spend an agent turn on
-  a state that has already moved on.
+  Commit verification is selected by the order's repository. Restart completion can target
+  named order IDs or, by default, all pending-restart orders, verifying each recorded commit
+  against its configured deployment tree before closing it.
+- Work-order notifications target the current action owner and skip self-wakes. Managed local
+  and remote delivery rechecks queued notices before they consume an agent turn. Terminal
+  notices are ordinary group messages and carry no such work-order freshness check, so a
+  notice held in a busy terminal queue can still arrive after the order has moved on.
 
 ### Nudging
 
@@ -90,10 +92,12 @@ upgrading or downgrading.
   shared deduplication history retains only the latest 2,000 seen keys. Settle or discard
   pending rotation reminders and remove or repoint the CLI hooks before the older
   `session-record` and `session-activity` commands disappear.
-- Current Claude Code does not expose a reliable busy marker throughout streamed output.
-  Reliable busy back-pressure requires both `UserPromptSubmit` and `Stop` hooks; see
+- Install `SessionStart` before relying on either hook-based activity or terminal rotation
+  reminders: it creates the per-window session record that the other hooks must match.
+  Reliable busy back-pressure on current Claude Code requires all three configured hooks —
+  `SessionStart`, `UserPromptSubmit`, and `Stop` — because streamed output has no reliable
+  screen marker. Without matching hook data, screen matching is only a fallback. See
   [the terminal hook configuration](docs/TERMINAL.md#optional-session-rotation-reminders).
-  Screen matching is only a fallback.
-- Terminal rotation reminders additionally require the `SessionStart` hook. Without its
-  per-window session record, mousecrew deliberately does not guess which transcript belongs
-  to the terminal and does not measure a rotation rule.
+- Rotation reminders use that same `SessionStart` record to locate the transcript. Without
+  it, mousecrew deliberately does not guess which transcript belongs to the terminal and
+  does not measure a rotation rule.
