@@ -81,6 +81,7 @@ const DEFAULTS = {
     wakeDir: null,
     wakeMaxContent: DEFAULT_WAKE_MAX_CONTENT,
     wakeSettleMs: DEFAULT_WAKE_SETTLE_MS,
+    rotationPollMs: 300000,
   },
   contextWatch: {
     enabled: true,
@@ -96,6 +97,31 @@ const DEFAULTS = {
 
 const VALID_TRANSPORTS = new Set(['local', 'remote', 'terminal']);
 const VALID_RUNNERS = new Set(['claude', 'exec']);
+const VALID_ROTATION_KINDS = new Set(['tokens', 'marker']);
+
+function validateRotation(rotation, where) {
+  if (rotation === undefined) return [];
+  const rules = Array.isArray(rotation) ? rotation : [rotation];
+  if (!rules.length) return [`${where}: terminal.rotation must contain at least one rule`];
+  const errors = [];
+  for (const [index, rule] of rules.entries()) {
+    const at = `${where}: terminal.rotation${rules.length > 1 ? `[${index}]` : ''}`;
+    if (!rule || typeof rule !== 'object' || Array.isArray(rule)) {
+      errors.push(`${at} must be an object`);
+      continue;
+    }
+    if (!VALID_ROTATION_KINDS.has(rule.kind)) {
+      errors.push(`${at}.kind must be "tokens" or "marker"`);
+    }
+    if (!Number.isInteger(rule.limit) || rule.limit < 1) {
+      errors.push(`${at}.limit must be a positive integer`);
+    }
+    if (rule.kind === 'marker' && (typeof rule.marker !== 'string' || !rule.marker)) {
+      errors.push(`${at}.marker must be a non-empty string`);
+    }
+  }
+  return errors;
+}
 
 function validateProjects(projects) {
   if (!Array.isArray(projects)) {
@@ -180,6 +206,9 @@ function validateAgents(agents) {
     if (transport === 'terminal' && a.terminal && a.terminal.inputBox !== undefined
         && a.terminal.inputBox !== 'claude-code') {
       errors.push(`${where}: terminal.inputBox must be "claude-code" when configured`);
+    }
+    if (transport === 'terminal' && a.terminal) {
+      errors.push(...validateRotation(a.terminal.rotation, where));
     }
     if (a.repos !== undefined && !Array.isArray(a.repos)) {
       errors.push(`${where}: repos must be an array`);
@@ -294,6 +323,9 @@ function load({ configFile, agentsFile, root } = {}) {
   }
   if (!Number.isInteger(cfg.delivery.wakeSettleMs) || cfg.delivery.wakeSettleMs < 0) {
     throw new Error('delivery.wakeSettleMs must be a non-negative integer');
+  }
+  if (!Number.isInteger(cfg.delivery.rotationPollMs) || cfg.delivery.rotationPollMs < 1) {
+    throw new Error('delivery.rotationPollMs must be a positive integer');
   }
   if (cfg.delivery.wakeDir !== null) {
     cfg.delivery.wakeDir = path.resolve(base, expandTilde(cfg.delivery.wakeDir));

@@ -47,7 +47,9 @@
     "forcedDraftHoldMs": 90000,
     "wakeDir": null,
     "wakeMaxContent": 600,
-    "wakeSettleMs": 5000
+    "wakeSettleMs": 5000,
+    "// rotationPollMs": "How often terminal session-rotation rules are measured.",
+    "rotationPollMs": 300000
   },
 
   "// contextWatch": "Warn an agent when its context window is close to full.",

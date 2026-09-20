@@ -134,6 +134,7 @@ function isBusy(screen, pattern) {
  */
 function filterFresh(pending, now = Date.now(), ttlMs = 10 * 60 * 1000, forcedGraceMs = DEFAULT_FORCED_GRACE_MS) {
   return pending.filter((item) => {
+    if (item && item.kind === 'rotate') return true;
     const forced = Boolean(item && item.forcedAt);
     const t = Date.parse(forced ? item.forcedAt : item && item.queuedAt);
     if (!Number.isFinite(t)) return true;
@@ -163,6 +164,7 @@ function capPending(pending, max = 200) {
  */
 function envelope({ kind, agent, sender, content, cli = 'mousecrew' }) {
   if (kind === 'wake') return `[local wake · ${sender}] ${content}`;
+  if (kind === 'rotate') return `[session rotation reminder] ${content}`;
   if (kind === 'dm') {
     return `[direct] ${sender}: ${content}\n  — reply with: ${cli} reply --as ${agent} "..."`;
   }
@@ -212,6 +214,7 @@ function batchEnvelope({ items, agent, cli = 'mousecrew', bodyFile = null, inlin
     ? `${body.slice(0, inlineLimit)}\n\n[truncated — read the full message before replying: ${bodyFile}]`
     : body;
   if (item.kind === 'wake') return `[local wake · ${item.sender}] ${rendered}`;
+  if (item.kind === 'rotate') return `[session rotation reminder] ${rendered}`;
   const heading = batch.length === 1
     ? `[${item.kind === 'dm' ? 'direct' : 'group'}] ${item.sender}: `
     : `[group batch] ${batch.length} messages delivered together\n`;
@@ -226,7 +229,8 @@ function mergeDmBodies(items) {
 
 function markForcedDeliveries(items, now = Date.now(), busy = false) {
   const candidates = (Array.isArray(items) ? items : [])
-    .filter((item) => item && item.kind !== 'wake' && !item.forcedAt && (busy || item.draftHeldAt));
+    .filter((item) => item && item.kind !== 'wake' && item.kind !== 'rotate'
+      && !item.forcedAt && (busy || item.draftHeldAt));
   const forcedAt = new Date(now).toISOString();
   const forced = [];
   const absorbed = [];

@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert');
+const fs = require('fs');
 const http = require('http');
+const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
@@ -27,18 +29,37 @@ async function scriptedApi(t, replies) {
   return { base: `http://127.0.0.1:${server.address().port}`, requests };
 }
 
-function runCli(args, base) {
+function runCli(args, base, options = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [CLI, ...args], {
-      env: { ...process.env, MOUSECREW_URL: base, MOUSECREW_TOKEN: TOKEN },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        MOUSECREW_URL: base,
+        MOUSECREW_TOKEN: TOKEN,
+        ...(options.env || {}),
+      },
+      stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
     });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => { stdout += chunk; });
     child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.on('close', (code) => resolve({ code, stdout, stderr }));
+    if (options.input !== undefined) child.stdin.end(options.input);
   });
+}
+
+function localCrewRoot(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mousecrew-cli-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(root, 'config.json'), '{}');
+  fs.writeFileSync(path.join(root, 'agents.json'), JSON.stringify({
+    agents: [{
+      id: 'scout', displayName: 'Scout', aliases: ['s'], transport: 'terminal',
+      terminal: { adapter: 'fake' },
+    }],
+  }));
+  return root;
 }
 
 test('advance stops at submitted instead of taking review for the assignee', async (t) => {
@@ -228,4 +249,58 @@ test('rotate uses the graceful endpoint and does not claim an unverified success
   assert.match(result.stdout, /queued/);
   assert.match(result.stdout, /status/);
   assert.doesNotMatch(result.stdout, /success|succeeded/i);
+});
+
+test('session-record accepts the three window sources, replaces the agent record, and keeps it private', async (t) => {
+  const root = localCrewRoot(t);
+  const env = { MOUSECREW_ROOT: root, MOUSECREW_WINDOW: '%env', TMUX_PANE: '%tmux' };
+  const hook = (session) => JSON.stringify({
+    session_id: session,
+    transcript_path: path.join(root, `${session}.jsonl`),
+    cwd: root,
+  });
+  const calls = [
+    { args: ['session-record', '--as', 'Scout', '--window', '%flag'], input: hook('flag'), windowRef: '%flag' },
+    { args: ['session-record', '--as', 's'], input: hook('env'), windowRef: '%env' },
+    {
+      args: ['session-record', '--as', 'scout'], input: hook('tmux'), windowRef: '%tmux',
+      env: { ...env, MOUSECREW_WINDOW: '' },
+    },
+  ];
+
+  const file = path.join(root, 'data', 'sessions', 'session-scout.json');
+  for (const call of calls) {
+    const result = await runCli(call.args, 'http://unused', {
+      input: call.input,
+      env: call.env || env,
+    });
+    assert.equal(result.code, 0, result.stderr);
+    const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.equal(record.agent, 'scout');
+    assert.equal(record.sessionId, JSON.parse(call.input).session_id);
+    assert.equal(record.windowRef, call.windowRef);
+  }
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+});
+
+test('session-record rejects malformed or incomplete hook input without creating a record', async (t) => {
+  const root = localCrewRoot(t);
+  const env = { MOUSECREW_ROOT: root, MOUSECREW_WINDOW: '%1' };
+  const file = path.join(root, 'data', 'sessions', 'session-scout.json');
+  const valid = await runCli(['session-record', '--as', 'scout'], 'http://unused', {
+    env,
+    input: JSON.stringify({ session_id: 'old', transcript_path: '/tmp/old.jsonl' }),
+  });
+  assert.equal(valid.code, 0, valid.stderr);
+  assert.equal(fs.existsSync(file), true);
+
+  for (const input of [
+    '{not json',
+    JSON.stringify({ transcript_path: '/tmp/transcript.jsonl' }),
+    JSON.stringify({ session_id: 'session-a', transcript_path: '   ' }),
+  ]) {
+    const result = await runCli(['session-record', '--as', 'scout'], 'http://unused', { env, input });
+    assert.equal(result.code, 1);
+    assert.equal(fs.existsSync(file), false, 'a failed SessionStart cannot leave the old session current');
+  }
 });

@@ -15,6 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const core = require('./sidecar-core');
 const inputDraft = require('./input-draft');
+const rotation = require('./rotation');
 
 const DEFAULTS = {
   historyPollMs: 15_000,
@@ -33,6 +34,8 @@ const DEFAULTS = {
   wakeDir: null,
   wakeMaxContent: core.DEFAULT_WAKE_MAX_CONTENT,
   wakeSettleMs: core.DEFAULT_WAKE_SETTLE_MS,
+  rotationPollMs: 5 * 60 * 1000,
+  handoffDir: path.join(process.cwd(), 'data', 'handoff'),
   screenLines: 12,
   busyPattern: 'esc to interrupt',
 };
@@ -58,8 +61,14 @@ class Sidecar extends EventEmitter {
     this.agents = (deps.agents || []).filter((a) => a.transport === 'terminal');
     this.terminalIds = this.agents.map((a) => a.id);
     this.byId = new Map(this.agents.map((a) => [a.id, a]));
+    this.rotationAgents = this.agents.filter((agent) => (
+      agent.terminal && agent.terminal.rotation
+    ));
 
     this.statePath = deps.statePath || null;
+    this.sessionDir = deps.sessionDir || (this.statePath
+      ? path.join(path.dirname(this.statePath), 'sessions')
+      : null);
     this.state = { seen: [], pending: [], acks: [], bootstrapped: false };
     this._timers = [];
     this._draining = new Set();
@@ -172,6 +181,49 @@ class Sidecar extends EventEmitter {
     }
     this._emitQueued(staged.entry);
     return staged.entry;
+  }
+
+  async tickRotation(now = new Date(this.now())) {
+    if (!this.rotationAgents.length || !this.sessionDir) return [];
+    let windows;
+    try { windows = await this.adapter.listWindows(); }
+    catch (error) {
+      this.emit('event', { type: 'rotation-list-failed', error: error.message });
+      return [];
+    }
+
+    const queued = [];
+    for (const cfg of this.rotationAgents) {
+      const identityName = cfg.terminal.target || cfg.displayName || cfg.id;
+      const found = core.resolveWindow(windows, identityName);
+      if (!found.ref) continue;
+      const record = rotation.readSessionRecord(this.sessionDir, cfg.id);
+      if (!record || record.windowRef !== found.ref) continue;
+      const measurement = rotation.measure(record, cfg.terminal.rotation);
+      if (!measurement || !measurement.over) continue;
+      if (this.state.pending.some((item) => (
+        item && item.kind === 'rotate' && item.agent === cfg.id
+        && item.rotateSessionId === record.sessionId
+      ))) continue;
+      const key = rotation.rotateKey(cfg.id, record.sessionId, now);
+      if (this._seen(key)) continue;
+      const entry = this.queue({
+        agent: cfg.id,
+        kind: 'rotate',
+        sender: 'mousecrew',
+        content: rotation.rotateBody(cfg.id, measurement, this.opt.handoffDir, now),
+        sourceKey: key,
+        rotateWindowRef: record.windowRef,
+        rotateSessionId: record.sessionId,
+      });
+      this._saveState();
+      this.emit('event', {
+        type: 'rotation-queued', agent: cfg.id, key,
+        kind: measurement.kind, value: measurement.value, limit: measurement.limit,
+      });
+      queued.push(entry);
+    }
+    return queued;
   }
 
   _queueWake(request) {
@@ -458,6 +510,20 @@ class Sidecar extends EventEmitter {
     }
   }
 
+  _rotationSource(item, ref) {
+    if (!item || item.kind !== 'rotate') return 'match';
+    const record = this.sessionDir
+      ? rotation.readSessionRecord(this.sessionDir, item.agent)
+      : null;
+    return rotation.rotateSourceState(item, ref, record);
+  }
+
+  _discardStaleRotation(item, ref) {
+    this.state.pending = this.state.pending.filter((entry) => entry !== item);
+    this._saveState();
+    this.emit('event', { type: 'rotation-stale', agent: item.agent, ref });
+  }
+
   /**
    * One delivery pass: for each crew member with something waiting, if their window is
    * free, type the oldest item in.
@@ -498,6 +564,17 @@ class Sidecar extends EventEmitter {
         if (this.state.pending.some((item) => item.agent === agent)) {
           this.emit('event', { type: 'no-window', agent, reason: found.reason, candidates: found.candidates });
         }
+        continue;
+      }
+
+      const head = this.state.pending.find((item) => item.agent === agent);
+      const initialRotationSource = this._rotationSource(head, found.ref);
+      if (initialRotationSource === 'stale') {
+        this._discardStaleRotation(head, found.ref);
+        continue;
+      }
+      if (initialRotationSource === 'unknown') {
+        this.emit('event', { type: 'rotation-held', agent, ref: found.ref });
         continue;
       }
 
@@ -552,6 +629,17 @@ class Sidecar extends EventEmitter {
 
       this._draining.add(agent);
       try {
+        if (item.kind === 'rotate') {
+          const source = this._rotationSource(item, found.ref);
+          if (source === 'stale') {
+            this._discardStaleRotation(item, found.ref);
+            continue;
+          }
+          if (source === 'unknown') {
+            this.emit('event', { type: 'rotation-held', agent, ref: found.ref });
+            continue;
+          }
+        }
         if (forced) {
           const triedAt = new Date(this.now()).toISOString();
           for (const entry of batch) entry.forcedTriedAt = triedAt;
@@ -658,6 +746,9 @@ class Sidecar extends EventEmitter {
     every(this.opt.historyPollMs, () => this.pollHistory());
     every(this.opt.busyPollMs, () => this.deliver());
     every(this.opt.presencePollMs, () => this.reportPresence());
+    if (this.rotationAgents.length) {
+      every(this.opt.rotationPollMs, () => this.tickRotation());
+    }
     this.emit('event', { type: 'started', agents: this.terminalIds });
   }
 

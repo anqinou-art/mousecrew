@@ -45,7 +45,71 @@ node bin/mousecrew-sidecar.js
 `identity` claims the window. It also *releases* the name from any other window holding it,
 because two windows answering to one name is not a tie — it is a message typed into
 whichever one the resolver happened to pick, and after a session restore that is often the
-dead one.
+dead one. Moving an identity also invalidates a session record tied to the released window.
+
+## Optional session-rotation reminders
+
+For Claude Code, a `SessionStart` hook can tell mousecrew exactly which transcript belongs
+to this window. Mousecrew deliberately does not scan processes, recent files, or working
+directories to guess the answer: without a hook record, the sidecar does not measure that
+agent.
+
+Add a hook like this to Claude Code's settings, using absolute paths for your checkout:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{
+      "hooks": [{
+        "type": "command",
+        "command": "MOUSECREW_ROOT=/absolute/path/to/mousecrew node /absolute/path/to/mousecrew/bin/mousecrew.js session-record --as scout"
+      }]
+    }]
+  }
+}
+```
+
+Claude Code passes the hook JSON on stdin. `session-record` requires its `session_id` and
+`transcript_path`; malformed or incomplete input exits nonzero, never writes a partial
+record, and invalidates an older record for the same window. The window reference comes,
+in order, from `--window`, `MOUSECREW_WINDOW`, or
+`TMUX_PANE`. tmux supplies `TMUX_PANE`; for another adapter, arrange one of the first two.
+The resulting per-agent record lives under `data/sessions/` beside the sidecar state, is
+mode `0600`, and is atomically replaced when a new session starts.
+
+Configure one rule or an array of rules on the terminal agent:
+
+```json
+{
+  "terminal": {
+    "adapter": "tmux",
+    "target": "scout",
+    "rotation": [
+      { "kind": "tokens", "limit": 120000 },
+      { "kind": "marker", "marker": "\"type\":\"compacted\"", "limit": 10 }
+    ]
+  }
+}
+```
+
+`tokens` reads only the final 128 KiB of a Claude-style JSONL transcript and uses the last
+reported `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`. `marker`
+counts whole-file lines containing the configured literal string. With multiple rules, any
+one reaching its limit is enough. An unreadable transcript or unrecognised usage is unknown,
+not zero and not a reason to guess.
+
+The sidecar checks every `delivery.rotationPollMs` (default five minutes). It measures only
+when the record's window is the one currently claiming that identity, keeps at most one
+reminder queued for an agent/session, and can remind again in a later hour while the same
+session remains over its limit. A reminder waits for the normal busy and input-box gates,
+but never expires, never becomes a forced interruption, and never joins a message batch.
+Immediately before typing it, the sidecar verifies the recorded `(window, session)` again:
+an explicit mismatch discards the stale reminder; temporarily unreadable evidence leaves it
+queued. The message names the current measurement, configured limit, and today's handoff
+path under `contextWatch.handoffDir/<agent>-handoff/`.
+
+This is only a reminder. Mousecrew does not rotate an interactive terminal session; finish
+the current work, write the handoff, and start the new session yourself.
 
 ## How a message gets there
 
