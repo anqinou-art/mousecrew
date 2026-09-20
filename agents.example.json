@@ -17,8 +17,6 @@
       "repos": ["myproject"],
       "canMerge": false,
       "idleTimeoutMs": 1800000,
-      "// rotateVerifyMs": "How long graceful rotation waits before recording a provisional failure.",
-      "rotateVerifyMs": 60000,
       "contextLimit": 200000,
       "contextWatch": true
     },

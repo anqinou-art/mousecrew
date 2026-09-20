@@ -88,15 +88,10 @@ test('terminal input-box detection only accepts a known reader', () => {
   ]).some((error) => /terminal\.inputBox must be "claude-code"/.test(error)));
 });
 
-test('screen and rotation timing overrides reject unusable values', () => {
+test('empty terminal busy patterns are rejected', () => {
   assert.ok(ok([
     { id: 'term', transport: 'terminal', terminal: { adapter: 'tmux', busyPattern: '' } },
   ]).some((error) => /terminal\.busyPattern must be a non-empty string/.test(error)));
-  assert.ok(ok([
-    { id: 'worker', transport: 'local', workDir: '/tmp/worker', rotateVerifyMs: 0 },
-  ]).some((error) => /rotateVerifyMs must be a positive integer/.test(error)));
-  assert.equal(normalizeAgent({ id: 'worker' }).rotateVerifyMs, 60000);
-  assert.equal(normalizeAgent({ id: 'worker', rotateVerifyMs: 90000 }).rotateVerifyMs, 90000);
 });
 
 test('the old verifyRepos array is refused with the object format in the error', (t) => {

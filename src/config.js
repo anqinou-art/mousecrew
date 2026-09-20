@@ -214,10 +214,6 @@ function validateAgents(agents) {
     if (transport === 'terminal' && a.terminal) {
       errors.push(...validateRotation(a.terminal.rotation, where));
     }
-    if (a.rotateVerifyMs !== undefined
-        && (!Number.isInteger(a.rotateVerifyMs) || a.rotateVerifyMs < 1)) {
-      errors.push(`${where}: rotateVerifyMs must be a positive integer when configured`);
-    }
     if (a.repos !== undefined && !Array.isArray(a.repos)) {
       errors.push(`${where}: repos must be an array`);
     }
@@ -275,7 +271,6 @@ function normalizeAgent(a) {
     idleTimeoutMs: a.idleTimeoutMs || 30 * 60 * 1000,
     turnIdleMs: a.turnIdleMs || 10 * 60 * 1000,
     turnHardMs: a.turnHardMs || 30 * 60 * 1000,
-    rotateVerifyMs: a.rotateVerifyMs || 60 * 1000,
     contextLimit: a.contextLimit || 200_000,
     contextWatch: a.contextWatch !== false,
     terminal: a.terminal || null,

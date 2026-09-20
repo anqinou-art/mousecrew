@@ -124,11 +124,11 @@ not deployment: mousecrew still does not pull, deploy, or restart anything.
 
 For a session-aware local agent, `mousecrew rotate <agent>` waits for the current turn to
 finish, starts a fresh session before queued messages drain, and verifies that the new
-process reports a different session id. The command only says whether rotation started or
-was queued; check `mousecrew status` for a verifying, verified, verified-late, or failed
-result. Verification waits `rotateVerifyMs` (60 seconds by default) for that local agent.
-A timeout records a provisional failure, which a later different session id corrects to
-verified-late. The older
+process reports a different session id. Any event from the new process carrying a session
+id can confirm the result; a matching old id is failure. If the new CLI has not emitted
+such an event yet, status remains `pending confirmation` and shows the elapsed wait instead
+of turning silence into failure. The command only says whether rotation started or was
+queued; check `mousecrew status` for the result. The older
 `POST /api/agents/:id/session/new` endpoint remains the force option: it interrupts a
 running turn immediately.
 
@@ -215,8 +215,12 @@ delivery waits at this gate for at most `delivery.forcedDraftHoldMs` (90 seconds
 An unrecognised screen layout fails open, so a different CLI or TUI update behaves exactly
 as if input-box detection were disabled.
 
-Terminal agents can also opt into session-rotation reminders with `terminal.rotation`.
-A Claude Code `SessionStart` hook records the exact window, session id, and transcript;
+Terminal agents can also opt into activity hooks and session-rotation reminders. Claude
+Code `SessionStart`, `UserPromptSubmit`, and `Stop` hooks record the exact window, session
+id, transcript, and current busy/idle state in one per-agent record. Matching hook activity
+wins; without it, delivery falls back to the configured screen marker. Current Claude Code
+does not show a reliable marker throughout streamed output, so install all three hooks for
+reliable back-pressure. A `SessionStart` record also enables `terminal.rotation`;
 mousecrew never guesses which recent file belongs to a window. Rules can watch the latest
 Claude-style context-token usage, count literal marker lines, or use both (either limit
 triggers). Reminders keep waiting for an idle, draft-safe window without expiring, forced

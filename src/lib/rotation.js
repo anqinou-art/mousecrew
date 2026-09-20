@@ -1,8 +1,11 @@
 const fs = require('fs');
 const path = require('path');
+const { randomUUID } = require('crypto');
 const { execFileSync } = require('child_process');
 
 const TAIL_BYTES = 128 * 1024;
+const LOCK_WAIT_MS = 5000;
+const LOCK_RETRY_MS = 10;
 
 function safePart(value) {
   return `id-${Buffer.from(JSON.stringify(String(value)), 'utf8').toString('base64url')}`;
@@ -30,7 +33,174 @@ function readSessionRecord(dir, agent, { readFile = fs.readFileSync } = {}) {
   }
 }
 
-function writeSessionRecord(dir, record, {
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function readLockOwner(lock, { lockReadFile = fs.readFileSync } = {}) {
+  try {
+    const owner = JSON.parse(lockReadFile(lock, 'utf8'));
+    if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0
+        || typeof owner.token !== 'string' || !owner.token) return null;
+    return owner;
+  } catch {
+    return null;
+  }
+}
+
+function isLockOwnerAlive(owner, { processKill = process.kill } = {}) {
+  if (!owner) return false;
+  try {
+    processKill(owner.pid, 0);
+    return true;
+  } catch (error) {
+    return !error || error.code !== 'ESRCH';
+  }
+}
+
+function createOwnedLock(lock, {
+  lockWriteFile = fs.writeFileSync, lockLink = fs.linkSync, lockUnlink = fs.unlinkSync,
+  newLockToken = randomUUID,
+} = {}) {
+  const owner = { pid: process.pid, token: newLockToken() };
+  const prepared = `${lock}.owner-${owner.pid}-${owner.token}.tmp`;
+  lockWriteFile(prepared, JSON.stringify(owner), { flag: 'wx', mode: 0o600 });
+  try {
+    lockLink(prepared, lock);
+  } finally {
+    try { lockUnlink(prepared); } catch {}
+  }
+  return owner;
+}
+
+function releaseOwnedLock(lock, owner, deps) {
+  const { lockUnlink = fs.unlinkSync } = deps;
+  const current = readLockOwner(lock, deps);
+  if (!current || current.pid !== owner.pid || current.token !== owner.token) {
+    throw new Error(`session record lock ownership lost: ${lock}`);
+  }
+  lockUnlink(lock);
+}
+
+function namedLockOwner(entry, prefix, suffix = '') {
+  if (!entry.startsWith(prefix) || (suffix && !entry.endsWith(suffix))) return null;
+  const value = entry.slice(prefix.length, suffix ? -suffix.length : undefined);
+  const separator = value.indexOf('-');
+  const pidText = separator < 0 ? '' : value.slice(0, separator);
+  const token = separator < 0 ? '' : value.slice(separator + 1);
+  if (!/^[1-9]\d*$/.test(pidText) || !token) return null;
+  const pid = Number.parseInt(pidText, 10);
+  if (!Number.isSafeInteger(pid)) return null;
+  return { pid, token };
+}
+
+function cleanupAbandonedLockLinks(lock, {
+  lockReadDir = fs.readdirSync, lockUnlink = fs.unlinkSync, ...deps
+} = {}) {
+  const dir = path.dirname(lock);
+  const name = path.basename(lock);
+  const reclaimPrefix = `${name}.reclaim-`;
+  const ownerPrefix = `${name}.owner-`;
+  let entries;
+  try { entries = lockReadDir(dir); } catch (error) {
+    if (error && error.code === 'ENOENT') return;
+    throw error;
+  }
+  for (const entry of entries) {
+    const reclaimOwner = namedLockOwner(entry, reclaimPrefix);
+    const preparedOwner = namedLockOwner(entry, ownerPrefix, '.tmp');
+    const linkOwner = reclaimOwner || preparedOwner;
+    if (!linkOwner || isLockOwnerAlive(linkOwner, deps)) continue;
+    const file = path.join(dir, entry);
+    if (preparedOwner) {
+      const contents = readLockOwner(file, deps);
+      if (!contents || contents.pid !== preparedOwner.pid
+          || contents.token !== preparedOwner.token) continue;
+    }
+    try { lockUnlink(file); } catch (error) {
+      if (!error || error.code !== 'ENOENT') throw error;
+    }
+  }
+}
+
+function reclaimAbandonedLock(lock, deps) {
+  const {
+    lockLink = fs.linkSync, lockStat = fs.statSync, lockUnlink = fs.unlinkSync,
+    newLockToken = randomUUID,
+  } = deps;
+  const claim = `${lock}.reclaim-${process.pid}-${newLockToken()}`;
+  try {
+    lockLink(lock, claim);
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return false;
+    throw error;
+  }
+  try {
+    // The claim pins the observed inode. Two links means only the main path and this
+    // reclaimer refer to it, so another reclaimer cannot act on the same observation.
+    const owner = readLockOwner(claim, deps);
+    if (isLockOwnerAlive(owner, deps)) return false;
+    let claimStat;
+    let currentStat;
+    try {
+      claimStat = lockStat(claim);
+      currentStat = lockStat(lock);
+    } catch (error) {
+      if (error && error.code === 'ENOENT') return false;
+      throw error;
+    }
+    if (claimStat.dev !== currentStat.dev || claimStat.ino !== currentStat.ino
+        || claimStat.nlink !== 2 || currentStat.nlink !== 2) return false;
+    lockUnlink(lock);
+    return true;
+  } finally {
+    try { lockUnlink(claim); } catch (error) {
+      if (!error || error.code !== 'ENOENT') throw error;
+    }
+  }
+}
+
+function acquireOwnedLock(lock, deadline, deps) {
+  const { now = Date.now, wait = sleepSync } = deps;
+  while (true) {
+    cleanupAbandonedLockLinks(lock, deps);
+    try {
+      return createOwnedLock(lock, deps);
+    } catch (error) {
+      if (!error || error.code !== 'EEXIST') throw error;
+    }
+
+    const owner = readLockOwner(lock, deps);
+    if (!isLockOwnerAlive(owner, deps)) {
+      if (reclaimAbandonedLock(lock, deps)) continue;
+      if (now() >= deadline) throw new Error(`session record lock timed out: ${lock}`);
+      wait(LOCK_RETRY_MS);
+      continue;
+    }
+
+    if (now() >= deadline) throw new Error(`session record lock timed out: ${lock}`);
+    wait(LOCK_RETRY_MS);
+  }
+}
+
+function withSessionRecordLock(dir, agent, action, {
+  mkdir = fs.mkdirSync, chmod = fs.chmodSync, now = Date.now, wait = sleepSync,
+  ...lockDeps
+} = {}) {
+  mkdir(dir, { recursive: true, mode: 0o700 });
+  chmod(dir, 0o700);
+  const lock = `${sessionRecordPath(dir, agent)}.lock`;
+  const deadline = now() + LOCK_WAIT_MS;
+  const deps = { now, wait, ...lockDeps };
+  const owner = acquireOwnedLock(lock, deadline, deps);
+  try {
+    return action();
+  } finally {
+    releaseOwnedLock(lock, owner, deps);
+  }
+}
+
+function writeSessionRecordUnlocked(dir, record, {
   mkdir = fs.mkdirSync, writeFile = fs.writeFileSync, chmod = fs.chmodSync,
   rename = fs.renameSync, unlink = fs.unlinkSync,
 } = {}) {
@@ -50,13 +220,50 @@ function writeSessionRecord(dir, record, {
   return file;
 }
 
-function invalidateMovedRecord(dir, agent, oldRefs, {
-  readRecord = readSessionRecord, unlink = fs.unlinkSync,
-} = {}) {
-  const record = readRecord(dir, agent);
-  if (!record || !new Set(oldRefs || []).has(record.windowRef)) return false;
-  unlink(sessionRecordPath(dir, agent));
-  return true;
+function writeSessionRecord(dir, record, deps = {}) {
+  return withSessionRecordLock(
+    dir, record.agent, () => writeSessionRecordUnlocked(dir, record, deps), deps,
+  );
+}
+
+function updateSessionActivity(dir, agent, expected, deps = {}) {
+  return withSessionRecordLock(dir, agent, () => {
+    const record = readSessionRecord(dir, agent, deps);
+    if (!record || record.windowRef !== expected.windowRef
+        || record.sessionId !== expected.sessionId) {
+      return { updated: false, file: null };
+    }
+    record.activity = {
+      state: expected.state,
+      recordedAt: expected.recordedAt,
+      windowRef: expected.windowRef,
+      sessionId: expected.sessionId,
+    };
+    return {
+      updated: true,
+      file: writeSessionRecordUnlocked(dir, record, deps),
+    };
+  }, deps);
+}
+
+function invalidateMovedRecord(dir, agent, oldRefs, deps = {}) {
+  const { readRecord = readSessionRecord, unlink = fs.unlinkSync } = deps;
+  return withSessionRecordLock(dir, agent, () => {
+    const record = readRecord(dir, agent);
+    if (!record || !new Set(oldRefs || []).has(record.windowRef)) return false;
+    unlink(sessionRecordPath(dir, agent));
+    return true;
+  }, deps);
+}
+
+function sessionActivity(record, currentRef) {
+  if (!record || record.windowRef !== currentRef) return null;
+  const activity = record.activity;
+  if (!activity || typeof activity !== 'object' || Array.isArray(activity)) return null;
+  if (activity.state !== 'busy' && activity.state !== 'idle') return null;
+  if (activity.windowRef !== record.windowRef || activity.sessionId !== record.sessionId) return null;
+  if (typeof activity.recordedAt !== 'string' || !activity.recordedAt) return null;
+  return activity;
 }
 
 function readTail(file, maxBytes = TAIL_BYTES, fsImpl = fs) {
@@ -186,6 +393,7 @@ function rotateBody(agent, measurement, handoffDir, now = new Date()) {
 
 module.exports = {
   TAIL_BYTES, sessionDirectory, sessionRecordPath, readSessionRecord, writeSessionRecord,
-  invalidateMovedRecord, readTail, measureTokens, measureMarker, rotationRules, measure,
+  updateSessionActivity, invalidateMovedRecord, sessionActivity,
+  readTail, measureTokens, measureMarker, rotationRules, measure,
   rotateKey, rotateSourceState, rotateBody, formatMeasurement,
 };

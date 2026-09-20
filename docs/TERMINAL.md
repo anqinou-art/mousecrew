@@ -49,10 +49,10 @@ dead one. Moving an identity also invalidates a session record tied to the relea
 
 ## Optional session-rotation reminders
 
-For Claude Code, a `SessionStart` hook can tell mousecrew exactly which transcript belongs
-to this window. Mousecrew deliberately does not scan processes, recent files, or working
-directories to guess the answer: without a hook record, the sidecar does not measure that
-agent.
+For Claude Code, three hooks can tell mousecrew which transcript belongs to this window
+and whether the current turn is active. Mousecrew deliberately does not scan processes,
+recent files, or working directories to guess the answer: without a `SessionStart` record,
+the sidecar does not measure that agent.
 
 Add a hook like this to Claude Code's settings, using absolute paths for your checkout:
 
@@ -63,6 +63,18 @@ Add a hook like this to Claude Code's settings, using absolute paths for your ch
       "hooks": [{
         "type": "command",
         "command": "MOUSECREW_ROOT=/absolute/path/to/mousecrew node /absolute/path/to/mousecrew/bin/mousecrew.js session-record --as scout"
+      }]
+    }],
+    "UserPromptSubmit": [{
+      "hooks": [{
+        "type": "command",
+        "command": "MOUSECREW_ROOT=/absolute/path/to/mousecrew node /absolute/path/to/mousecrew/bin/mousecrew.js session-activity --as scout busy"
+      }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "MOUSECREW_ROOT=/absolute/path/to/mousecrew node /absolute/path/to/mousecrew/bin/mousecrew.js session-activity --as scout idle"
       }]
     }]
   }
@@ -75,7 +87,9 @@ record, and invalidates an older record for the same window. The window referenc
 in order, from `--window`, `MOUSECREW_WINDOW`, or
 `TMUX_PANE`. tmux supplies `TMUX_PANE`; for another adapter, arrange one of the first two.
 The resulting per-agent record lives under `data/sessions/` beside the sidecar state, is
-mode `0600`, and is atomically replaced when a new session starts.
+mode `0600`, and is atomically replaced when a new session starts. `UserPromptSubmit` and
+`Stop` write activity and its timestamp into that same record only when both the window and
+session id still match. They never create a second source of session truth.
 
 Configure one rule or an array of rules on the terminal agent:
 
@@ -117,7 +131,7 @@ the current work, write the handoff, and start the new session yourself.
 group or direct message → resolve its recipient ┐
 local wake JSON → validate and persist it       ┘
     → which window claims them?  (looked up fresh, never cached)
-    → is that window busy?       (read the screen)
+    → is that window busy?       (matching hook activity, else screen fallback)
         busy  → wait; after 10 minutes, force one delivery attempt (except local wakes)
         free  → is input text changing?  (same screen read; configured agents only)
                   yes → wait for it to become quiet
@@ -135,22 +149,23 @@ directory. It types only the prefix and file path into the window, with an instr
 read the file before replying. A storage failure falls back to the complete inline delivery,
 so shortening the terminal input can never become message loss.
 
-**Busy is decided by reading the screen** and looking for the CLI's own marker
-(`busyPattern`). That sounds crude next to asking the tool how it is doing, and it is more
-reliable: measured side by side for twenty minutes, one CLI's "am I busy" field never
-returned to idle after finishing while another's did. Same field, two behaviours. A status
-that is wrong in the *still working* direction is worse than no status, because it looks
-like work.
+**Busy uses matching hook activity first.** The `UserPromptSubmit` / `Stop` pair above is
+the reliable path for current Claude Code. During streamed prose, Claude Code 2.1.278 does
+not keep a busy marker on screen; the only visible change may be that the answer grows, so
+no fixed screen regular expression can cover the whole turn.
 
-This is a screen heuristic, so a CLI layout change can make it miss busy work and inject
-messages mid-turn. After upgrading a CLI, run a deliberately slow turn and check
-`mousecrew status` while it is running; the terminal agent should report `busy`. If a
-message is waiting, the sidecar should also emit `busy-wait`. Set that agent's
-`terminal.busyPattern` when its screen uses a different marker; an explicit pattern always
-overrides the built-in Claude Code default.
+If there is no matching hook activity, mousecrew falls back to reading the screen and
+looking for `busyPattern`. This remains useful for older versions and the first instant of
+thinking, but a layout change can make it miss work. An agent-specific
+`terminal.busyPattern` overrides the built-in Claude Code default. `mousecrew status`
+labels each terminal agent's activity source as `hook` or `screen`, and the dashboard uses
+the same verdict as delivery. After changing hooks or upgrading a CLI, run a slow turn and
+confirm that status reports `busy activity hook`; with a message waiting, the sidecar
+should also emit `busy-wait` with source `hook`.
 
-The status a dashboard shows comes from the same reading, so it cannot contradict what
-delivery is doing.
+If Claude Code exits after the busy hook and never runs `Stop`, the record remains busy.
+Mousecrew does not add a second activity timeout: the existing rule still makes one forced
+delivery attempt after ten minutes.
 
 **Input-box protection is opt-in per terminal agent.** Set `terminal.inputBox` to
 `"claude-code"` to recognise the prompt between Claude Code's bottom two horizontal rules.
