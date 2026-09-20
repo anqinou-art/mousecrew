@@ -35,14 +35,16 @@
     "backoffAfter": 3
   },
 
-  "// delivery": "Terminal-window agents only: back-pressure, batching, long-message storage, and one forced attempt at expiry.",
+  "// delivery": "Terminal-window agents only: back-pressure, input-box protection, batching, long-message storage, and one forced attempt at expiry.",
   "delivery": {
     "stalePendingMs": 600000,
     "maxPending": 200,
     "batchGroup": true,
     "inlineLimit": 600,
     "forceOnExpiry": true,
-    "forcedGraceMs": 120000
+    "forcedGraceMs": 120000,
+    "draftQuietMs": 120000,
+    "forcedDraftHoldMs": 90000
   },
 
   "// contextWatch": "Warn an agent when its context window is close to full.",

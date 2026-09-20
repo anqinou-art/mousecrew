@@ -14,6 +14,7 @@ const { EventEmitter } = require('events');
 const fs = require('fs');
 const path = require('path');
 const core = require('./sidecar-core');
+const inputDraft = require('./input-draft');
 
 const DEFAULTS = {
   historyPollMs: 15_000,
@@ -27,6 +28,8 @@ const DEFAULTS = {
   inlineLimit: core.DEFAULT_INLINE_LIMIT,
   forceOnExpiry: core.DEFAULT_FORCE_ON_EXPIRY,
   forcedGraceMs: core.DEFAULT_FORCED_GRACE_MS,
+  draftQuietMs: inputDraft.DEFAULT_DRAFT_QUIET_MS,
+  forcedDraftHoldMs: inputDraft.DEFAULT_FORCED_DRAFT_HOLD_MS,
   screenLines: 12,
   busyPattern: 'esc to interrupt',
 };
@@ -57,6 +60,7 @@ class Sidecar extends EventEmitter {
     this.state = { seen: [], pending: [], acks: [], bootstrapped: false };
     this._timers = [];
     this._draining = new Set();
+    this._draftWatch = inputDraft.createDraftWatch({ quietMs: this.opt.draftQuietMs });
     this._loadState();
   }
 
@@ -167,8 +171,30 @@ class Sidecar extends EventEmitter {
     }
   }
 
+  _markDraftHeld(agent, held) {
+    let changed = false;
+    const heldAt = new Date(this.now()).toISOString();
+    for (const item of this.state.pending) {
+      if (!item || item.agent !== agent) continue;
+      if (held && !item.draftHeldAt) { item.draftHeldAt = heldAt; changed = true; }
+      if (!held && item.draftHeldAt) { delete item.draftHeldAt; changed = true; }
+    }
+    if (changed) this._saveState();
+    return changed;
+  }
+
+  _draftVerdict(cfg, ref, screen) {
+    const type = cfg && cfg.terminal && cfg.terminal.inputBox;
+    if (!type) return { hold: false, reason: 'disabled', chars: 0 };
+    const box = inputDraft.readInputBox(type, screen);
+    return {
+      ...this._draftWatch.observe(ref, box, this.now()),
+      chars: box.text.length,
+    };
+  }
+
   /** Resolve expired items for one agent after the window and busy state are known. */
-  pruneStale({ agent = null, force = false } = {}) {
+  pruneStale({ agent = null, canForce = false, busy = false } = {}) {
     const now = this.now();
     const belongs = (item) => agent === null || item.agent === agent;
     const candidates = this.state.pending.filter(belongs);
@@ -176,8 +202,8 @@ class Sidecar extends EventEmitter {
       candidates, now, this.opt.stalePendingMs, this.opt.forcedGraceMs,
     );
     let forced = [];
-    if (force && this.opt.forceOnExpiry && expiring.length) {
-      const marked = core.markForcedDeliveries(expiring, now);
+    if (canForce && this.opt.forceOnExpiry && expiring.length) {
+      const marked = core.markForcedDeliveries(expiring, now, busy);
       forced = marked.forced;
       if (marked.absorbed.length) {
         const absorbed = new Set(marked.absorbed);
@@ -324,7 +350,21 @@ class Sidecar extends EventEmitter {
       }
 
       const busy = core.isBusy(screen, pattern);
-      this.pruneStale({ agent, force: busy });
+      let draft = null;
+      const inspectDraft = () => {
+        if (!draft) draft = this._draftVerdict(cfg, found.ref, screen);
+        return draft;
+      };
+      // A normal busy item stops at the activity gate. Only paths that can otherwise
+      // inject need an input-box decision, and both decisions reuse this screen read.
+      if (!busy) {
+        const verdict = inspectDraft();
+        if (verdict.hold) this._markDraftHeld(agent, true);
+      }
+      this.pruneStale({ agent, canForce: true, busy });
+      // Keep prior hold evidence until expiry has awarded any forced delivery it earned.
+      // Once that decision is made, a released gate clears the marker on survivors.
+      if (!busy && draft && !draft.hold) this._markDraftHeld(agent, false);
       const batch = core.nextDeliverableBatch(this.state.pending, agent, this.opt.batchGroup);
       const item = batch[0];
       if (!item) continue;
@@ -335,9 +375,22 @@ class Sidecar extends EventEmitter {
         continue;
       }
 
+      const forced = plan === 'inject_forced';
+      const verdict = inspectDraft();
+      this._markDraftHeld(agent, verdict.hold);
+      const forcedAt = Date.parse(item.forcedAt);
+      const forcedMayWait = forced && Number.isFinite(forcedAt)
+        && this.now() - forcedAt < this.opt.forcedDraftHoldMs;
+      if (verdict.hold && (!forced || forcedMayWait)) {
+        this.emit('event', {
+          type: 'draft-hold', agent, ref: found.ref, reason: verdict.reason,
+          chars: verdict.chars, forced,
+        });
+        continue;
+      }
+
       this._draining.add(agent);
       try {
-        const forced = plan === 'inject_forced';
         if (forced) {
           const triedAt = new Date(this.now()).toISOString();
           for (const entry of batch) entry.forcedTriedAt = triedAt;

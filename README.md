@@ -172,15 +172,23 @@ is decided, why messages expire, and what an adapter is and is not responsible f
 | Lifecycle managed by | mousecrew | you |
 
 When a terminal window becomes idle, consecutive group messages for that crew member are
-combined into one injection and one response cycle. A direct message always remains a
-separate delivery so its receipt stays unambiguous. Set `delivery.batchGroup` to `false` to
-return to one message per pass.
+combined into one injection and one response cycle. A direct message normally remains a
+separate delivery so its receipt stays unambiguous. The exception is expiry: direct messages
+for the same agent that expire together share one forced injection, while each keeps its own
+receipt. Set `delivery.batchGroup` to `false` to return group traffic to one message per pass.
 
 By default, a message held back by a busy window for ten minutes gets one forced delivery
 attempt. This intentionally interrupts the agent once rather than let a continuously busy
 window miss every message. A failed forced attempt is not retried; it expires after the
 two-minute `delivery.forcedGraceMs` window. Set `delivery.forceOnExpiry` to `false` for the
 previous expire-without-interrupting behaviour.
+
+For a terminal agent using Claude Code, set `terminal.inputBox` to `"claude-code"`. The
+sidecar then delays an otherwise-ready delivery while input text is still changing, and
+releases it after `delivery.draftQuietMs` (two minutes by default) without changes. Forced
+delivery waits at this gate for at most `delivery.forcedDraftHoldMs` (90 seconds by default).
+An unrecognised screen layout fails open, so a different CLI or TUI update behaves exactly
+as if input-box detection were disabled.
 
 Message body text longer than `delivery.inlineLimit` (600 characters by default) is written
 to a private `0600` file beside the sidecar state. The terminal receives the first part, the

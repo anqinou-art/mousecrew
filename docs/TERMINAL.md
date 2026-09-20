@@ -55,11 +55,15 @@ group message
    → which window claims them?  (looked up fresh, never cached)
    → is that window busy?       (read the screen)
         busy  → wait; after 10 minutes, force one delivery attempt
-        free  → batch consecutive group messages, type once, press Enter
+        free  → is input text changing?  (same screen read; configured agents only)
+                  yes → wait for it to become quiet
+                  no  → batch consecutive group messages, type once, press Enter
 ```
 
 Direct messages are never included in a group batch: each one has its own delivery receipt.
-Set `delivery.batchGroup` to `false` for the previous one-message-per-pass behaviour.
+When several direct messages for one agent expire together, they do share one forced
+injection to avoid repeated interruptions, but each original message still gets its own
+receipt. Set `delivery.batchGroup` to `false` for the previous group-message behaviour.
 
 If one message body or a combined batch body exceeds `delivery.inlineLimit` (default 600
 characters), the sidecar stores the full delivery in a private `0600` file under its state
@@ -77,6 +81,14 @@ like work.
 The status a dashboard shows comes from the same reading, so it cannot contradict what
 delivery is doing.
 
+**Input-box protection is opt-in per terminal agent.** Set `terminal.inputBox` to
+`"claude-code"` to recognise the prompt between Claude Code's bottom two horizontal rules.
+Changing text delays injection; unchanged text is released after `delivery.draftQuietMs`
+(default two minutes), so placeholder text or an abandoned draft cannot block forever.
+Empty and unrecognised layouts do not block. A different CLI or a TUI layout change therefore
+degrades to the previous behaviour instead of guessing. This check reuses the screen already
+read for the busy decision; it does not extend the terminal-adapter contract.
+
 **A message blocked by a busy window gets one forced attempt after ten minutes.** This can
 interrupt work, deliberately: one interruption is preferable to a continuously busy agent
 never receiving anything. The attempt is recorded before text is sent, so a failure or
@@ -84,6 +96,8 @@ restart cannot turn the two-minute `delivery.forcedGraceMs` window into a retry 
 that grace period ends, the message expires. A message with no window, or one that remained
 queued while the window was idle, expires without a forced attempt. Set
 `delivery.forceOnExpiry` to `false` to expire every message at the original cutoff.
+Forced delivery still checks the input box, but waits there for at most
+`delivery.forcedDraftHoldMs` (default 90 seconds) before deliberately interrupting.
 
 A dropped *group* message is still in the group history. A dropped *direct* message looks,
 from the sender's side, exactly like being ignored — so that one is reported back, and shows
