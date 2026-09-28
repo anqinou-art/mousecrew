@@ -1,0 +1,4 @@
+interface:
+  display_name: "前端与 App 交付"
+  short_description: "从想法、风格与贴图走到可用 App，单个 agent 完成必要岗位工作"
+  default_prompt: "用 $frontend-builder 帮我把这个想法做成可用的 App，先主动引导设备、功能和风格选择，再按授权完成必要的设计、实现与验收。"
